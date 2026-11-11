@@ -27,6 +27,9 @@ so focus moves by direction: if you rearrange panes, Enter may not land on Claud
 | W, Up or Space | jump (over fireballs) |
 | J or F | sword |
 | K, S or Down (hold) | shield - blocks hits and fireballs from the side you face |
+| U or E | **dash** (1 MP) - quick, invulnerable, cuts enemies you pass |
+| I or R | **sword beam** (2 MP) - flies the way you face, pierces every enemy |
+| L or G | **spin** (3 MP) - 2 damage to everything close on both sides, swats fireballs |
 | P | pause / resume |
 | Q | quit |
 
@@ -40,6 +43,11 @@ so focus moves by direction: if you rearrange panes, Enter may not land on Claud
 - Imps: fast, one hit.
 - Devils: two hits, throw fireballs from range.
 - Brutes (wave 4+): five hits, hit for 2, can't be staggered - block them, then strike.
-A "!" over an enemy means it is about to strike. Hearts (<3) heal you.
+A "!" over an enemy means it is about to strike. Hearts (<3) heal you - every wave
+drops exactly two.
+
+## Mana
+The MP bar (next to HP) holds 6 points. It refills one point every 2.5 s and one per
+kill. A power you can't afford makes the bar blink.
 
 Try it alone: `python3 knight.py`

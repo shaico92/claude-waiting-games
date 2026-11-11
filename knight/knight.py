@@ -3,6 +3,7 @@
 
 Move: A/D or Left/Right   Jump: W / Up / Space   Sword: J or F
 Shield: K or S / Down     Pause: P               Quit: Q
+Powers (cost mana):  Dash: U or E (1)   Sword beam: I or R (2)   Spin: L or G (3)
 """
 import os, random, subprocess, sys, time
 
@@ -144,6 +145,14 @@ ALIVE = STATE + ".alive" if STATE else None               # heartbeat the Window
 FPS = 30
 DT = 1.0 / FPS
 KW, KH, MAX_HP = 3, 3, 5
+HEARTS_PER_WAVE = 2
+# movement (cells / s, cells / s^2): accelerate to RUN, glide to a stop
+RUN, ACCEL, TURN, FRICTION = 17.0, 110.0, 180.0, 60.0
+# mana and powers
+MAX_MP, MP_REGEN, MP_PER_KILL = 6, 2.5, 1       # MP_REGEN = seconds per point
+DASH_COST, BEAM_COST, SPIN_COST = 1, 2, 3
+DASH_TIME, DASH_SPEED = 0.18, 48.0
+BEAM_SPEED, SPIN_RANGE = 30.0, 5.0
 # Smallest playable pane: HUD row + jump apex (knight top = ground-4) + ground line.
 # A 40% Windows Terminal split of a non-maximized window is often only 8-9 rows.
 MIN_W, MIN_H = 36, 7
@@ -202,13 +211,19 @@ def focus_claude():
 class Game:
     def __init__(self, w):
         self.w = w
-        self.x, self.y, self.vy = w / 2.0, 0.0, 0.0
+        self.x, self.y, self.vx, self.vy = w / 2.0, 0.0, 0.0, 0.0
         self.face = 1
         self.hp = MAX_HP
+        self.mp, self.mp_t = MAX_MP, 0.0
+        self.mp_flash = 0.0   # MP bar blinks when a power is too expensive
         self.invuln = 0.0
         self.atk_t = 0.0      # sword visible
         self.atk_cd = 0.0
+        self.dash_t, self.dash_dir, self.dash_hit = 0.0, 1, set()
+        self.spin_t = 0.0     # spin pose visible
         self.enemies, self.fire, self.hearts, self.sparks = [], [], [], []
+        self.beams = []       # [x, vx, alive, ids of enemies already hit]
+        self.heart_drops, self.kills_left = 0, 0
         self.score = 0
         self.wave = 0
         self.queue = []
@@ -228,6 +243,7 @@ class Game:
             return
         self.hp -= dmg
         self.invuln = 1.0
+        self.vx = 0.0
         self.x = min(max(0.0, self.x + away * 3), self.w - KW - 1)
         if self.hp <= 0:
             self.hp, self.dead = 0, True
@@ -243,6 +259,8 @@ class Game:
         if self.wave >= 4 and self.wave % 2 == 0:
             self.queue.append("brute")
         self.spawn_t = 0.5
+        # exactly HEARTS_PER_WAVE hearts drop from this wave's kills
+        self.heart_drops, self.kills_left = HEARTS_PER_WAVE, len(self.queue)
 
     def spawn(self, kind):
         k = KINDS[kind]
@@ -269,6 +287,53 @@ class Game:
             if lo <= f[0] <= hi and self.y < 2:
                 f[2] = 0
 
+    # ---------- powers (cost mana)
+    def pay(self, cost):
+        if self.dead or self.dash_t > 0:
+            return False
+        if self.mp < cost:
+            self.mp_flash = 0.4
+            return False
+        self.mp -= cost
+        return True
+
+    def hit(self, e, dmg, push):
+        e["hp"] -= dmg
+        e["flash"] = 0.15
+        brute = e["kind"] == "brute"
+        e["x"] += push if not brute else push / 3.0
+        if not brute:
+            e["state"], e["t"] = "stun", 0.4
+        self.sparks.append([e["x"] + e["w"] / 2.0, 1.5, 0.15, "*"])
+
+    def dash(self):
+        """Quick invulnerable dash the way you face; cuts every enemy it passes."""
+        if self.pay(DASH_COST):
+            self.dash_t, self.dash_dir, self.dash_hit = DASH_TIME, self.face, set()
+            self.invuln = max(self.invuln, DASH_TIME + 0.1)
+
+    def beam(self):
+        """Sword beam: flies the way you face and pierces every enemy on its path."""
+        if self.pay(BEAM_COST):
+            self.atk_t = 0.18
+            x = self.x + KW if self.face > 0 else self.x - 3
+            self.beams.append([x, self.face * BEAM_SPEED, 1, set()])
+
+    def spin(self):
+        """Spin slash: 2 damage to everything close on both sides, swats fireballs."""
+        if not self.pay(SPIN_COST):
+            return
+        self.spin_t = 0.3
+        for e in self.enemies:
+            g, side = self.gap(e)
+            if g <= SPIN_RANGE:
+                self.hit(e, 2, side * 4)
+        for f in self.fire:
+            if abs(f[0] - (self.x + KW / 2.0)) <= SPIN_RANGE + 2:
+                f[2] = 0
+        for i in range(-2, 3):
+            self.sparks.append([self.x + 1 + i * 2.5, 1.0 + (i % 2), 0.25, "*"])
+
     # ---------- one simulation step
     def step(self, mv, blocking):
         if self.dead:
@@ -276,10 +341,40 @@ class Game:
         self.invuln = max(0.0, self.invuln - DT)
         self.atk_t = max(0.0, self.atk_t - DT)
         self.atk_cd = max(0.0, self.atk_cd - DT)
-        if mv and not blocking:
-            self.face = mv
-            self.x += mv * 18.0 * DT
-        self.x = min(max(0.0, self.x), self.w - KW - 1)
+        self.spin_t = max(0.0, self.spin_t - DT)
+        self.mp_flash = max(0.0, self.mp_flash - DT)
+        if self.mp < MAX_MP:
+            self.mp_t += DT
+            if self.mp_t >= MP_REGEN:
+                self.mp, self.mp_t = self.mp + 1, 0.0
+        else:
+            self.mp_t = 0.0
+
+        # movement: ease the speed toward the target instead of jumping to it
+        if self.dash_t > 0:
+            self.dash_t -= DT
+            self.x += self.dash_dir * DASH_SPEED * DT
+            self.vx = self.dash_dir * RUN
+            for e in self.enemies:
+                if id(e) not in self.dash_hit and self.gap(e)[0] <= 0.5:
+                    self.dash_hit.add(id(e))
+                    self.hit(e, 1, self.dash_dir * 2)
+        else:
+            target = 0.0
+            if mv and not blocking:
+                self.face = mv
+                target = mv * RUN
+            if target:
+                a = ACCEL if self.vx * target >= 0 else TURN
+            else:
+                a = FRICTION * (2 if blocking else 1)
+            dv = target - self.vx
+            self.vx += max(-a * DT, min(a * DT, dv))
+            self.x += self.vx * DT
+        lim = self.w - KW - 1
+        if self.x <= 0 or self.x >= lim:
+            self.x, self.vx = min(max(0.0, self.x), lim), 0.0
+            self.dash_t = min(self.dash_t, 0.0)
         self.y += self.vy * DT
         self.vy -= 40.0 * DT
         if self.y <= 0:
@@ -327,14 +422,30 @@ class Game:
                             e["state"], e["t"] = "cool", 0.5
                     else:
                         e["state"] = "walk"
+        # sword beams: pierce, 1 damage to each enemy once
+        for b in self.beams:
+            b[0] += b[1] * DT
+            for e in self.enemies:
+                if id(e) not in b[3] and e["x"] - 1 <= b[0] <= e["x"] + e["w"]:
+                    b[3].add(id(e))
+                    self.hit(e, 1, (1 if b[1] > 0 else -1) * 2)
+            for f in self.fire:
+                if abs(f[0] - b[0]) < 1.5:
+                    f[2] = 0
+        self.beams = [b for b in self.beams if -4 < b[0] < self.w + 2]
+
         alive = []
         for e in self.enemies:
             if e["hp"] > 0:
                 alive.append(e)
             else:
                 self.score += KINDS[e["kind"]]["score"]
-                if random.random() < 0.18 and self.hp < MAX_HP:
+                self.mp = min(MAX_MP, self.mp + MP_PER_KILL)
+                # spread the wave's hearts over its kills: the last kills always pay out
+                if self.heart_drops and random.random() < self.heart_drops / max(1, self.kills_left):
+                    self.heart_drops -= 1
                     self.hearts.append([min(max(1.0, e["x"] + 1), self.w - 3), 8.0])
+                self.kills_left = max(0, self.kills_left - 1)
         self.enemies = alive
 
         # fireballs: [x, vx, alive]
@@ -388,6 +499,10 @@ def knight_rows(g, blocking):
     r = g.face > 0
     if g.dead:
         return ["   ", "   ", "_o_"], 0
+    if g.spin_t > 0:
+        return (["\\O/", "-|-", "/ \\"] if int(g.spin_t * 20) % 2 else [" O ", "\\|/", "/ \\"]), 0
+    if g.dash_t > 0:
+        return ([" O ", "=|>", "/ /"], 0) if r else ([" O ", "<|=", "\\ \\"], 0)
     if g.atk_t > 0:
         return ([" O    ", "/|===>", "/ \\   "], 0) if r else (["    O ", "<===|\\", "   / \\"], -3)
     if blocking:
@@ -486,10 +601,21 @@ def main(scr):
                 if k in (ord(" "), 10, 13):
                     g = Game(w)
                 continue
+            # first press holds a bit longer than before so the gap until the
+            # OS key-repeat kicks in is bridged by the glide, not a stop
             if k in (ord("a"), ord("A"), curses.KEY_LEFT):
-                move_until[-1], move_until[1] = held("L", now, 0.22, 0.14), 0.0
+                move_until[-1], move_until[1] = held("L", now, 0.30, 0.12), 0.0
             elif k in (ord("d"), ord("D"), curses.KEY_RIGHT):
-                move_until[1], move_until[-1] = held("R", now, 0.22, 0.14), 0.0
+                move_until[1], move_until[-1] = held("R", now, 0.30, 0.12), 0.0
+            elif k in (ord("u"), ord("U"), ord("e"), ord("E")):
+                block_until = 0.0
+                g.dash()
+            elif k in (ord("i"), ord("I"), ord("r"), ord("R")):
+                block_until = 0.0
+                g.beam()
+            elif k in (ord("l"), ord("L"), ord("g"), ord("G")):
+                block_until = 0.0
+                g.spin()
             elif k in (ord("w"), ord("W"), ord(" "), curses.KEY_UP):
                 if g.y == 0:
                     g.vy = 14.0
@@ -521,13 +647,20 @@ def main(scr):
         put(scr, 0, 1, "HP ")
         put(scr, 0, 4, "#" * g.hp, col(1) | curses.A_BOLD)
         put(scr, 0, 4 + g.hp, "." * (MAX_HP - g.hp))
-        put(scr, 0, 12, "wave %d   score %d   best %d" % (g.wave, g.score, max(high, g.score)))
+        mx = 5 + MAX_HP
+        if g.mp_flash <= 0 or frame % 4 < 2:
+            put(scr, 0, mx, "MP ")
+            put(scr, 0, mx + 3, "*" * g.mp, col(2) | curses.A_BOLD)
+            put(scr, 0, mx + 3 + g.mp, "." * (MAX_MP - g.mp))
+        put(scr, 0, mx + 4 + MAX_MP, "wave %d  score %d  best %d" % (g.wave, g.score, max(high, g.score)))
         put(scr, ground + 1, 0, "=" * (w - 1), col(4))
         for hx, ttl in g.hearts:
             if ttl > 2 or frame % 6 < 3:
                 put(scr, ground, hx, "<3", col(1) | curses.A_BOLD)
         for f in g.fire:
             put(scr, ground, f[0], "@" if frame % 4 < 2 else "*", col(3) | curses.A_BOLD)
+        for b in g.beams:
+            put(scr, ground - 1, b[0], ")=>" if b[1] > 0 else "<=(", col(2) | curses.A_BOLD)
         for e in g.enemies:
             k = KINDS[e["kind"]]
             rows = k["wind"] if e["state"] == "windup" else k["walk"]
@@ -558,7 +691,7 @@ def main(scr):
         if msg:
             put(scr, max(1, h // 2 - 2), max(0, (w - len(msg)) // 2), msg, curses.A_REVERSE)
         if not banner and h >= 10:  # in a short pane row 1 is needed for the jump
-            tip = "A/D move  W jump  J sword  K shield  P pause  Q quit"
+            tip = "A/D move W jump J sword K shield | U dash I beam L spin | P Q"
             put(scr, 1, max(0, w - len(tip) - 2), tip, curses.A_DIM)
         scr.refresh()
         time.sleep(max(0, DT - (time.time() - t0)))
