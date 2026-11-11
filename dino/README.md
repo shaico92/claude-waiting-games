@@ -1,21 +1,17 @@
-# Claude Code dino game
+# Dino Run - a Claude Code waiting game
 
-A little jump-over-the-cactus game that pops up in a tmux pane while Claude Code is working.
-
-## Needs
-- macOS or Linux (or WSL), Python 3, tmux
-- Claude Code started **inside tmux**
-
-## Install
-    python3 install.py
-Then restart Claude Code. Remove with `python3 install.py uninstall`.
-(Your settings.json is backed up to settings.json.dino-backup first.)
+Jump over the cactuses for as long as you can. Part of the
+[Claude Code waiting games](..) plugin - see there to install.
 
 ## Play
-- Send a prompt: the game opens below Claude and takes focus.
-- Space / Up = jump, p = pause, q = quit.
-- When Claude finishes, a banner appears; Enter closes the game and returns you to Claude.
-- If Claude needs a permission answer, a banner appears; Enter jumps to Claude and pauses the game.
-  Switch back with your tmux prefix + arrow key.
+| Key | Action |
+|---|---|
+| Space, Up or W | jump |
+| P | pause / resume |
+| M or Tab | switch to another game |
+| Q | quit |
 
-Try the game alone: `python3 dino.py`
+It pauses when Claude finishes or asks you something (Enter jumps back to Claude) and
+resumes on your next prompt. Best score is kept in `~/.claude/waiting-games/dino-highscore`.
+
+Try it alone: `python3 dino/dino.py` from the repo root.

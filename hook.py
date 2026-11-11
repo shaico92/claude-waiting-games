@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code hook for the knight game.
+"""Claude Code hook for the waiting games (knight, dino - switch with M in game).
 usage: hook.py start|notify|stop|end   - never prints, never fails the hook
   start  (you sent a prompt)      open the game or resume it
   notify (Claude needs an answer) pause with a banner
@@ -14,8 +14,8 @@ Where the game opens, first match wins:
 import json, os, platform, shutil, subprocess, sys, tempfile, time
 
 HOME = os.path.dirname(os.path.abspath(__file__))
-GAME = os.path.join(HOME, "knight.py")
-TITLE = "Knight vs Devils"
+GAME = os.path.join(HOME, "games.py")
+TITLE = "Waiting games"
 IS_WSL = sys.platform.startswith("linux") and (
     "WSL_DISTRO_NAME" in os.environ or "microsoft" in platform.release().lower())
 QUIET = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

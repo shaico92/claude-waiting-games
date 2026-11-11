@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Install / uninstall the knight game WITHOUT the plugin system (old Claude Code, or
+"""Install / uninstall the waiting games WITHOUT the plugin system (old Claude Code, or
 no access to GitHub). Prefer the plugin - see README.md.
   python3 install.py               install
   python3 install.py uninstall     remove
-  python install.py terminal       Windows only: just make Windows Terminal the default
-  python install.py terminal-undo  Windows only: put the old default terminal back
+  python3 install.py terminal       Windows only: just make Windows Terminal the default
+  python3 install.py terminal-undo  Windows only: put the old default terminal back
 On Windows, install also makes Windows Terminal the default terminal (cmd, python,
 anything that opens a console opens in Windows Terminal); uninstall undoes it."""
 import json, os, shutil, sys
 
 SRC = os.path.dirname(os.path.abspath(__file__))
 CLAUDE = os.path.expanduser("~/.claude")
-DEST = os.path.join(CLAUDE, "knight-game")
+DEST = os.path.join(CLAUDE, "waiting-games", "app")
 SETTINGS = os.path.join(CLAUDE, "settings.json")
-MARKS = ("knight-game/hook.py", "knight-game/hooks/run.sh", "dino-game/hook.py")  # also replaces dino
+MARKS = ("waiting-games/app/hook.py", "knight-game/hook.py", "knight-game/hooks/run.sh",
+         "dino-game/hook.py")  # also removes the older knight/dino installs
 EVENTS = {"UserPromptSubmit": "start", "Notification": "notify", "Stop": "stop", "SessionEnd": "end"}
-FILES = ("knight.py", "hook.py", os.path.join("hooks", "run.sh"))
+FILES = ("hook.py", "games.py", "common.py", os.path.join("hooks", "run.sh"),
+         os.path.join("knight", "knight.py"), os.path.join("dino", "dino.py"))
 
 
 # Windows Terminal's console/terminal handoff classes (from its AppxManifest). Setting
@@ -23,7 +25,7 @@ FILES = ("knight.py", "hook.py", os.path.join("hooks", "run.sh"))
 CONSOLE_KEY = os.environ.get("KNIGHT_CONSOLE_KEY", r"Console\%%Startup")  # override = tests
 WT_DELEGATION = {"DelegationConsole": "{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}",
                  "DelegationTerminal": "{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}"}
-TERMINAL_BACKUP = os.path.join(CLAUDE, "knight-terminal-backup.json")
+TERMINAL_BACKUP = os.path.join(CLAUDE, "waiting-games-terminal-backup.json")
 
 
 def default_terminal(use_wt):
@@ -103,13 +105,14 @@ if uninstall:  # keep the high score file
             os.remove(os.path.join(DEST, name))
         except OSError:
             pass
-    for d in (os.path.join(DEST, "hooks"), DEST):
+    for d in [os.path.join(DEST, x) for x in ("hooks", "knight", "dino")] + [DEST]:
         try:
             os.rmdir(d)  # only if empty: the high score stays
         except OSError:
             pass
 else:
-    os.makedirs(os.path.join(DEST, "hooks"), exist_ok=True)
+    for d in ("hooks", "knight", "dino"):
+        os.makedirs(os.path.join(DEST, d), exist_ok=True)
     for name in FILES:
         shutil.copy(os.path.join(SRC, name), os.path.join(DEST, name))
     root = DEST.replace("\\", "/")  # forward slashes work in sh and PowerShell

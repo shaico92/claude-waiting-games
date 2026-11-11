@@ -1,8 +1,0 @@
-{
-  "name": "knight-game",
-  "version": "1.1.1",
-  "description": "Knight vs Devils: a terminal brawler that opens while Claude works and pauses when Claude waits for you. Windows 10/11, Linux, WSL, macOS and the VS Code extension.",
-  "author": { "name": "shaico92" },
-  "homepage": "https://github.com/shaico92/claude-waiting-games/tree/main/knight",
-  "keywords": ["game", "fun", "waiting", "hooks"]
-}
