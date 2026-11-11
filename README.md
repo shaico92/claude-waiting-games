@@ -9,7 +9,7 @@ while it is working, driven by Claude Code hooks - like the offline dinosaur in 
 | [`dino/`](dino) | Jump-over-the-cactus runner. Closes when Claude is done. |
 
 ## Knight - install as a plugin (Windows 10/11, Linux, WSL, macOS, VS Code)
-    /plugin install knight-game --marketplace shaico92/testingProjects
+    /plugin install knight-game --marketplace shaico92/claude-waiting-games
 
 Needs only Python 3. It opens in a tmux pane, a Windows Terminal split, or its own
 window (VS Code extension, other terminals). Details in [`knight/`](knight).

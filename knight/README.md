@@ -6,10 +6,10 @@ whenever Claude is waiting for your prompt.
 ## Install (plugin)
 From any terminal (PowerShell, bash, WSL):
 
-    claude plugin marketplace add shaico92/testingProjects
+    claude plugin marketplace add shaico92/claude-waiting-games
     claude plugin install knight-game@waiting-games
 
-or inside Claude Code: `/plugin install knight-game --marketplace shaico92/testingProjects`
+or inside Claude Code: `/plugin install knight-game --marketplace shaico92/claude-waiting-games`
 (type exactly that - nothing after it). Restart Claude Code and send a prompt.
 Remove with `claude plugin uninstall knight-game`; update with `claude plugin update knight-game`.
 
