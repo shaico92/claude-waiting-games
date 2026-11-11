@@ -138,9 +138,10 @@ else:
     import curses
 
 HOME = os.path.dirname(os.path.abspath(__file__))
-SCORE_FILE = os.path.join(HOME, "highscore")
+# kept outside the plugin folder, which is replaced on every plugin update
+SCORE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "knight-game", "highscore")
 STATE = sys.argv[1] if len(sys.argv) > 1 else None        # file written by the hooks
-CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane running Claude, or "wt"
+CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane id, "wt" or "window"
 ALIVE = STATE + ".alive" if STATE else None               # heartbeat the Windows hook checks
 FPS = 30
 DT = 1.0 / FPS
@@ -177,6 +178,7 @@ def load_high():
 
 def save_high(n):
     try:
+        os.makedirs(os.path.dirname(SCORE_FILE), exist_ok=True)
         open(SCORE_FILE, "w").write(str(n))
     except Exception:
         pass
@@ -201,8 +203,11 @@ def heartbeat():
 
 
 def focus_claude():
+    if CLAUDE_PANE == "window":
+        return  # its own window: nothing to move focus to
     if CLAUDE_PANE == "wt":
-        subprocess.Popen(["wt", "-w", "0", "move-focus", "up"], stdout=subprocess.DEVNULL,
+        subprocess.Popen(["wt" if os.name == "nt" else "wt.exe", "-w", "0", "move-focus", "up"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     elif CLAUDE_PANE:
         subprocess.call(["tmux", "select-pane", "-t", CLAUDE_PANE])
@@ -533,6 +538,8 @@ def main(scr):
     paused = False
     banner = None            # None | "done" | "notify"
     seen = read_state()
+    if seen and seen[1] == "quit":  # the session ended before the game got going
+        return
     if seen and seen[1] in ("done", "notify"):
         banner = seen[1]
     last_key = {}
@@ -571,6 +578,8 @@ def main(scr):
         st = read_state()
         if st != seen:
             seen = st
+            if st and st[1] == "quit":
+                return
             if st and st[1] in ("done", "notify"):
                 banner = st[1]
             elif st and st[1] == "run":
@@ -678,10 +687,11 @@ def main(scr):
             put(scr, ground - int(sy), sx, ch, col(3) | curses.A_BOLD)
 
         msg = None
+        go = "  P = keep playing " if CLAUDE_PANE == "window" else "  Enter = go to Claude "
         if banner == "done":
-            msg = " PAUSED - Claude is waiting for your prompt.  Enter = go to Claude "
+            msg = " PAUSED - Claude is waiting for your prompt." + go
         elif banner == "notify":
-            msg = " PAUSED - Claude needs you!  Enter = go to Claude "
+            msg = " PAUSED - Claude needs you!" + go
         elif g.dead:
             msg = " YOU DIED - space to fight again, q to quit "
         elif paused:

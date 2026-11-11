@@ -1,15 +1,60 @@
 #!/usr/bin/env python3
-"""Claude Code hook for the knight game (tmux, or Windows Terminal on Windows).
-usage: hook.py start|notify|stop   - never prints, never fails the hook
-  start  (you sent a prompt)      open the game or resume it, and focus it
+"""Claude Code hook for the knight game.
+usage: hook.py start|notify|stop|end   - never prints, never fails the hook
+  start  (you sent a prompt)      open the game or resume it
   notify (Claude needs an answer) pause with a banner
-  stop   (Claude is waiting)      pause with a banner"""
-import json, os, shutil, subprocess, sys, tempfile, time
+  stop   (Claude is waiting)      pause with a banner
+  end    (session closed)         close the game
+
+Where the game opens, first match wins:
+  tmux              a pane below Claude (macOS, Linux, WSL)
+  Windows Terminal  a split pane below Claude (Windows, or WSL inside Windows Terminal)
+  window            its own terminal window - the VS Code extension, VS Code's terminal,
+                    and any other terminal (Windows console, WSL, Linux desktop, macOS)"""
+import json, os, platform, shutil, subprocess, sys, tempfile, time
 
 HOME = os.path.dirname(os.path.abspath(__file__))
 GAME = os.path.join(HOME, "knight.py")
+TITLE = "Knight vs Devils"
+IS_WSL = sys.platform.startswith("linux") and (
+    "WSL_DISTRO_NAME" in os.environ or "microsoft" in platform.release().lower())
+QUIET = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def spawn(cmd, **kw):
+    """Start a program that outlives this hook."""
+    if os.name == "nt":
+        flags = kw.pop("creationflags", 0) | 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        try:  # leave Claude's job object, if any, so the game survives the hook
+            return subprocess.Popen(cmd, creationflags=flags | 0x01000000, **QUIET, **kw)
+        except OSError:
+            return subprocess.Popen(cmd, creationflags=flags, **QUIET, **kw)
+    return subprocess.Popen(cmd, start_new_session=True, **QUIET, **kw)
+
+
+def in_vscode():
+    """The VS Code extension (and VS Code's own terminal) has no pane we can split."""
+    e = os.environ
+    return ("vscode" in e.get("CLAUDE_CODE_ENTRYPOINT", "").lower()
+            or e.get("TERM_PROGRAM") == "vscode"
+            or "VSCODE_PID" in e or "VSCODE_IPC_HOOK" in e or "VSCODE_IPC_HOOK_CLI" in e)
+
+
+def wt_exe():
+    return shutil.which("wt.exe" if IS_WSL else "wt")
+
+
+def game_cmd(state, mode):
+    """The command line that runs the game, as seen from Windows when we are in WSL."""
+    cmd = [sys.executable, GAME, state, mode]
+    if IS_WSL:
+        cmd = ["wsl.exe", "-d", os.environ.get("WSL_DISTRO_NAME", ""), "--"] + cmd
+        if not cmd[2]:
+            del cmd[1:3]
+    return cmd
+
+
+# ---------------------------------------------------------------- tmux
 def tmux(*a):
     return subprocess.run(["tmux", *a], capture_output=True, text=True)
 
@@ -33,49 +78,90 @@ def run_tmux(action, pane):
                  sys.executable, GAME, state, pane)
         if r.returncode == 0:
             open(panefile, "w").write(r.stdout.strip())
-    elif action in ("notify", "stop") and alive:
-        open(state, "w").write("done" if action == "stop" else "notify")
+    elif alive:
+        open(state, "w").write({"stop": "done", "notify": "notify", "end": "quit"}.get(action, "run"))
 
 
-def run_wt(action):
-    """Windows Terminal has no pane ids, so the game pane is found by a heartbeat file
-    it touches every second, and focus moves by direction (the game sits below Claude)."""
-    wt = shutil.which("wt")
-    if not wt:
-        return
-    key = os.environ["WT_SESSION"]
-    try:
-        key = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}").get("session_id") or key
-    except Exception:
-        pass
-    state = os.path.join(tempfile.gettempdir(), "claude-knight-wt-" + key + ".state")
+# ------------------------------------------- Windows Terminal split / own window
+# Neither has pane ids we can query, so the game touches "<state>.alive" every second
+# and the hook treats a fresh heartbeat as "the game is open".
+def session_key(data):
+    return (data.get("session_id") or os.environ.get("WT_SESSION") or "default").replace(os.sep, "_")
+
+
+def run_heartbeat(action, data, mode):
+    state = os.path.join(tempfile.gettempdir(), "claude-knight-%s-%s.state" % (mode, session_key(data)))
     try:
         alive = time.time() - os.stat(state + ".alive").st_mtime < 3
     except Exception:
         alive = False
 
-    def wt_run(*a):
-        subprocess.Popen([wt, "-w", "0", *a], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    if action == "start":
-        open(state, "w").write("run")
+    if action != "start":
+        if alive or action == "end":
+            open(state, "w").write({"stop": "done", "notify": "notify", "end": "quit"}.get(action, "run"))
+        return
+    open(state, "w").write("run")
+    if mode == "wt":
+        wt = wt_exe()
         if alive:
-            wt_run("move-focus", "down")
+            spawn([wt, "-w", "0", "move-focus", "down"])
         else:
-            wt_run("split-pane", "-H", "-s", "0.4", "--title", "Knight vs Devils",
-                   sys.executable, GAME, state, "wt")
-    elif action in ("notify", "stop") and alive:
-        open(state, "w").write("done" if action == "stop" else "notify")
+            spawn([wt, "-w", "0", "split-pane", "-H", "-s", "0.4", "--title", TITLE]
+                  + game_cmd(state, "wt"))
+    elif not alive:
+        open_window(state)
+
+
+def open_window(state):
+    cmd = game_cmd(state, "window")
+    if os.name == "nt" or IS_WSL:
+        wt = wt_exe()
+        if wt:  # one named Windows Terminal window, reused across sessions
+            spawn([wt, "-w", "claude-knight", "new-tab", "--title", TITLE] + cmd)
+        elif os.name == "nt":
+            spawn(cmd, creationflags=0x00000010)  # CREATE_NEW_CONSOLE
+        else:
+            spawn(["cmd.exe", "/c", "start", '"%s"' % TITLE] + cmd, cwd="/mnt/c" if os.path.isdir("/mnt/c") else None)
+        return
+    if sys.platform == "darwin":
+        line = " ".join("'%s'" % a.replace("'", "'\\''") for a in cmd)
+        spawn(["osascript", "-e", 'tell application "Terminal" to do script "%s"' % line.replace('"', '\\"'),
+               "-e", 'tell application "Terminal" to activate'])
+        return
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return  # no desktop to open a window on (ssh, server): run knight.py by hand
+    terms = [
+        ("x-terminal-emulator", ["-T", TITLE, "-e"]),
+        ("gnome-terminal", ["--title", TITLE, "--"]),
+        ("konsole", ["-p", "tabtitle=" + TITLE, "-e"]),
+        ("xfce4-terminal", ["-T", TITLE, "-x"]),
+        ("kitty", ["--title", TITLE]),
+        ("alacritty", ["-t", TITLE, "-e"]),
+        ("wezterm", ["start", "--"]),
+        ("foot", ["-T", TITLE]),
+        ("xterm", ["-T", TITLE, "-e"]),
+    ]
+    for name, args in terms:
+        exe = shutil.which(name)
+        if exe:
+            spawn([exe] + args + cmd)
+            return
 
 
 def main():
     action = sys.argv[1] if len(sys.argv) > 1 else ""
+    data = {}
+    try:
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}")
+    except Exception:
+        pass
     pane = os.environ.get("TMUX_PANE")
-    if os.environ.get("TMUX") and pane:
+    if os.environ.get("TMUX") and pane and shutil.which("tmux"):
         run_tmux(action, pane)
-    elif os.name == "nt" and os.environ.get("WT_SESSION"):
-        run_wt(action)
+    elif os.environ.get("WT_SESSION") and not in_vscode() and wt_exe():
+        run_heartbeat(action, data, "wt")
+    else:
+        run_heartbeat(action, data, "window")
 
 
 if __name__ == "__main__":
