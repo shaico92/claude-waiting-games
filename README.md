@@ -1,6 +1,6 @@
 # Claude Code waiting games
 
-Small terminal games that open in a tmux pane under [Claude Code](https://claude.com/claude-code)
+Small terminal games that open next to [Claude Code](https://claude.com/claude-code)
 while it is working, driven by Claude Code hooks - like the offline dinosaur in Chrome.
 
 | Game | What it is |
@@ -8,17 +8,18 @@ while it is working, driven by Claude Code hooks - like the offline dinosaur in 
 | [`knight/`](knight) | Knight vs Devils: move, jump, sword and shield against waves of devils. Pauses when Claude waits for your prompt and resumes on the next one. |
 | [`dino/`](dino) | Jump-over-the-cactus runner. Closes when Claude is done. |
 
-## Needs
-macOS / Linux / WSL, Python 3, tmux, and Claude Code started inside tmux.
-The knight game also runs natively on Windows inside Windows Terminal - see [`knight/`](knight).
+## Knight - install as a plugin (Windows 10/11, Linux, WSL, macOS, VS Code)
+    /plugin install knight-game --marketplace shaico92/testingProjects
 
-## Install one
-    cd knight        # or: cd dino
+Needs only Python 3. It opens in a tmux pane, a Windows Terminal split, or its own
+window (VS Code extension, other terminals). Details in [`knight/`](knight).
+
+## Dino - manual install (macOS / Linux / WSL, inside tmux)
+    cd dino
     python3 install.py
 
-Then restart Claude Code inside tmux and send a prompt. The installer copies the game to
-`~/.claude/` and adds `UserPromptSubmit`, `Notification` and `Stop` hooks to
-`~/.claude/settings.json` (a backup is saved first). Installing the knight game replaces
-the dino hooks. Remove with `python3 install.py uninstall`.
+Then restart Claude Code inside tmux and send a prompt. Installing dino replaces the
+knight game's manual hooks (and the other way round). Remove with
+`python3 install.py uninstall`.
 
 Each game also runs standalone: `python3 knight/knight.py` or `python3 dino/dino.py`.

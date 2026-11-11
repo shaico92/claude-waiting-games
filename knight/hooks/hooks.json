@@ -1,0 +1,49 @@
+{
+  "description": "Open, pause, resume and close the knight game around Claude's turns",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo `# <#` >/dev/null; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" start; exit 0 #> > $null; foreach ($p in 'python','py','python3') { if (Get-Command $p -ErrorAction SilentlyContinue) { $input | & $p \"${CLAUDE_PLUGIN_ROOT}/hook.py\" start; if ($LASTEXITCODE -eq 0) { break } } }",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo `# <#` >/dev/null; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" notify; exit 0 #> > $null; foreach ($p in 'python','py','python3') { if (Get-Command $p -ErrorAction SilentlyContinue) { $input | & $p \"${CLAUDE_PLUGIN_ROOT}/hook.py\" notify; if ($LASTEXITCODE -eq 0) { break } } }",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo `# <#` >/dev/null; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" stop; exit 0 #> > $null; foreach ($p in 'python','py','python3') { if (Get-Command $p -ErrorAction SilentlyContinue) { $input | & $p \"${CLAUDE_PLUGIN_ROOT}/hook.py\" stop; if ($LASTEXITCODE -eq 0) { break } } }",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo `# <#` >/dev/null; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" end; exit 0 #> > $null; foreach ($p in 'python','py','python3') { if (Get-Command $p -ErrorAction SilentlyContinue) { $input | & $p \"${CLAUDE_PLUGIN_ROOT}/hook.py\" end; if ($LASTEXITCODE -eq 0) { break } } }",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

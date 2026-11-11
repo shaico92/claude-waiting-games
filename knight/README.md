@@ -3,22 +3,41 @@
 A 2D terminal brawler that opens under Claude Code while it works and pauses
 whenever Claude is waiting for your prompt.
 
-## Needs
-- macOS / Linux / WSL: Python 3, tmux, and Claude Code started **inside tmux**.
-- Windows 10/11: Python 3 and Claude Code started **inside Windows Terminal**
-  (`winget install Microsoft.WindowsTerminal` on Windows 10). No extra packages:
-  on Windows the game draws with VT escape codes itself.
+## Install (plugin)
+In Claude Code:
 
-## Install
+    /plugin install knight-game --marketplace shaico92/testingProjects
+
+(Older Claude Code: `/plugin marketplace add shaico92/testingProjects`, then
+`/plugin install knight-game@waiting-games`.) Restart Claude Code and send a prompt.
+Remove with `/plugin uninstall knight-game`.
+
+Needs **Python 3** on the PATH (`python3`, `python` or `py`) - nothing else.
+Used `install.py` before? Run `python install.py uninstall` first, or the game opens twice.
+
+## Where it opens
+| You run Claude Code in | The game opens |
+|---|---|
+| tmux (Linux, macOS, WSL) | a pane below Claude; Enter jumps back to Claude |
+| Windows Terminal (Windows 10/11, or WSL inside it) | a split pane below Claude; Enter jumps back |
+| VS Code (the Claude extension, or `claude` in VS Code's terminal) | its own Windows Terminal / terminal window |
+| any other terminal (Windows console, Linux desktop, macOS Terminal) | its own window |
+
+The game pauses when Claude finishes or asks you something, resumes on your next
+prompt, and closes when the Claude session ends. In its own window there is no pane to
+jump back to: click Claude (P keeps playing).
+
+On Windows 10 without Windows Terminal the window is a classic console (still works);
+`winget install Microsoft.WindowsTerminal` gives the split pane. On a Linux server with
+no desktop (ssh) there is nowhere to open a window: use tmux.
+
+Windows Terminal can't target a pane by id, so focus moves by direction: if you rearrange
+panes, Enter may not land on Claude (just click it).
+
+### Without the plugin system
     python3 install.py        # Windows: python install.py
-Restart Claude Code. This replaces the dino game's hooks if you installed it.
-Remove with `python3 install.py uninstall` (settings.json is backed up first).
-The hooks run with the Python that ran the installer.
-
-### Windows Terminal notes
-The game opens in a split pane below Claude. Windows Terminal can't target a pane by id,
-so focus moves by direction: if you rearrange panes, Enter may not land on Claude
-(just click it).
+copies the game to `~/.claude/knight-game` and adds the same hooks to
+`~/.claude/settings.json` (backed up first). Remove with `python3 install.py uninstall`.
 
 ## Controls
 | Key | Action |
@@ -70,4 +89,4 @@ beam, wider spin. Perks last until you die.
 The MP bar (next to HP) holds 6 points. It refills one point every 2.5 s and one per
 kill. A power you can't afford makes the bar blink.
 
-Try it alone: `python3 knight.py`
+Try it alone: `python3 knight.py` (Windows: `python knight.py`)

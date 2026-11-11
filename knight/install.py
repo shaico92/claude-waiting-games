@@ -46,6 +46,11 @@ if uninstall:  # keep the high score file
             os.remove(os.path.join(DEST, name))
         except OSError:
             pass
+    for d in (os.path.join(DEST, "hooks"), DEST):
+        try:
+            os.rmdir(d)  # only if empty: the high score stays
+        except OSError:
+            pass
 else:
     os.makedirs(os.path.join(DEST, "hooks"), exist_ok=True)
     for name in FILES:
