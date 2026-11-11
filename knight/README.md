@@ -47,6 +47,7 @@ copies the game to `~/.claude/knight-game` and adds the same hooks to
 | J or F | sword - in the air it's a **downward stab** (2 damage, bounces you off) |
 | K, S or Down (hold) | shield - blocks hits and fireballs from the side you face. Press it just before a hit lands to **parry**: a long stun, +1 MP, and fireballs fly back |
 | 1 / 2 / 3 | pick a perk after a wave |
+| H or ? | **how to play** - controls, skills and enemies (pauses the game) |
 | U or E | **dash** (1 MP) - quick, invulnerable, cuts enemies you pass |
 | I or R | **sword beam** (2 MP) - flies the way you face, pierces every enemy |
 | L or G | **spin** (3 MP) - 2 damage to everything close on both sides, swats fireballs |

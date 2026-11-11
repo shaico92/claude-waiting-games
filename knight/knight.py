@@ -202,6 +202,28 @@ PERKS = {
     "spin":  ("Wider spin",   lambda g: g.spin_range < 9),
 }
 
+# the H screen: (text, color pair, is a heading). Lines fit a 36-column pane.
+HELP = [
+    ("CONTROLS", 0, True),
+    ("A/D move    W jump    P pause", 0, False),
+    ("J sword     K shield (hold it)", 0, False),
+    ("W then J    stab down, bounces", 2, False),
+    ("tap K just before a hit: PARRY", 2, False),
+    ("  stuns, +1 MP, fireballs fly back", 0, False),
+    ("U dash 1MP  I beam 2MP  L spin 3MP", 2, False),
+    ("COMBO  kills <2.5s apart: x2-x4", 3, False),
+    ("PERKS  1/2/3 after each wave", 3, False),
+    ("ENEMIES", 0, True),
+    ("'o'   imp     fast, 1 hit", 1, False),
+    ("^o^   devil   throws fireballs", 1, False),
+    ("/v\\   bat     flies: W+J, I or L", 5, False),
+    ("(*)   bomber  lit fuse: run!", 3, False),
+    ("[W\\   guard   K or parry, then J", 1, False),
+    ("(O O) boss    every 5th wave", 5, False),
+    ("!  attack coming    !! big one", 3, False),
+    ("~  stunned: hit it now", 3, False),
+]
+
 
 def load_high():
     try:
@@ -861,6 +883,7 @@ def main(scr):
     h, w = scr.getmaxyx()
     g = Game(w)
     paused = False
+    help_page = None         # None, or the page of the H screen being shown
     banner = None            # None | "done" | "notify"
     seen = read_state()
     if seen and seen[1] == "quit":  # the session ended before the game got going
@@ -883,7 +906,7 @@ def main(scr):
 
     while True:
         t0 = time.time()
-        if not (paused or banner):
+        if not (paused or banner or help_page is not None):
             frame += 1
         if int(t0) != int(t0 - DT):
             heartbeat()
@@ -899,6 +922,10 @@ def main(scr):
         h, w = scr.getmaxyx()
         g.w = w
         ground = h - 2
+        per_page = max(1, h - 2)          # rows 1 .. h-2; the footer takes the last row
+        pages = -(-len(HELP) // per_page)
+        if help_page is not None:
+            help_page = min(help_page, pages - 1)  # the pane may have been resized
 
         st = read_state()
         if st != seen:
@@ -906,7 +933,7 @@ def main(scr):
             if st and st[1] == "quit":
                 return
             if st and st[1] in ("done", "notify"):
-                banner = st[1]
+                banner, help_page = st[1], None
             elif st and st[1] == "run":
                 banner, paused = None, False
 
@@ -923,6 +950,16 @@ def main(scr):
                     focus_claude()
                 elif k in (ord("p"), ord("P")):
                     banner, paused = None, False
+                continue
+            if help_page is not None:  # H / space / Enter: next page; past the last, or Esc: close
+                if k == 27 or (k in (ord("h"), ord("H"), ord("?"), ord(" "), 10, 13)
+                               and help_page + 1 >= pages):
+                    help_page = None
+                elif k in (ord("h"), ord("H"), ord("?"), ord(" "), 10, 13):
+                    help_page += 1
+                continue
+            if k in (ord("h"), ord("H"), ord("?")):
+                help_page = 0
                 continue
             if k in (ord("p"), ord("P")):
                 paused = not paused
@@ -973,7 +1010,7 @@ def main(scr):
             scr.refresh()
             time.sleep(0.1)
             continue
-        if not (paused or banner):
+        if not (paused or banner or help_page is not None):
             mv = 1 if now < move_until[1] else (-1 if now < move_until[-1] else 0)
             was_dead = g.dead
             g.step(mv, blocking)
@@ -1058,7 +1095,7 @@ def main(scr):
                 sub = " space = fight again, q = quit "
                 put(scr, max(1, h // 2 - 2) + 1, max(0, (w - len(sub)) // 2), sub, curses.A_REVERSE)
         elif paused:
-            msg = " paused - space to resume "
+            msg = " paused - space to resume, H = help "
         elif menu:
             pass
         elif g.clear_t > 0:
@@ -1066,11 +1103,22 @@ def main(scr):
         elif g.inter < 2.5 and not g.enemies and not g.queue:
             msg = " %s %d incoming... " % ("BOSS wave" if (g.wave + 1) % BOSS_EVERY == 0 else "Wave",
                                             g.wave + 1)
+            if g.wave == 0:
+                msg = " Wave 1 incoming - H = how to play "
         if msg:
             put(scr, max(1, h // 2 - 2), max(0, (w - len(msg)) // 2), msg, curses.A_REVERSE)
         if not (banner or menu or boss) and h >= 10:  # in a short pane row 1 is needed for the jump
-            tip = "A/D move W jump J sword K shield | U dash I beam L spin | P Q"
+            tip = "A/D move W jump J sword K shield | U dash I beam L spin | H help P Q"
             put(scr, 1, max(0, w - len(tip) - 2), tip, curses.A_DIM)
+        if help_page is not None:  # the H screen covers everything below the HUD
+            for y in range(1, h):
+                put(scr, y, 0, " " * (w - 1))
+            x0 = max(1, (w - 34) // 2)
+            for i, (text, c, head) in enumerate(HELP[help_page * per_page:(help_page + 1) * per_page]):
+                attr = curses.A_REVERSE if head else (col(c) | curses.A_BOLD if c else 0)
+                put(scr, 1 + i, x0, (" %s " % text) if head else text, attr)
+            more = "H next, Esc close  %d/%d" % (help_page + 1, pages) if pages > 1 else "H or Esc: close"
+            put(scr, h - 1, x0, more, curses.A_DIM)
         scr.refresh()
         time.sleep(max(0, DT - (time.time() - t0)))
 
