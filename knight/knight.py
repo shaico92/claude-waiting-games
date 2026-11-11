@@ -4,15 +4,149 @@
 Move: A/D or Left/Right   Jump: W / Up / Space   Sword: J or F
 Shield: K or S / Down     Pause: P               Quit: Q
 """
-import curses, os, random, subprocess, sys, time
+import os, random, subprocess, sys, time
+
+class _VTCurses:
+    """Windows: draw with VT escape codes instead of PDCurses.
+
+    PDCurses writes cell-by-cell to the old console buffer, and Windows Terminal
+    only sees that through ConPTY's translation - sprites went missing or
+    flickered. Here each frame is one write: only rows that changed, wrapped in
+    synchronized-output markers so the terminal shows it all at once.
+    Mimics just the part of the curses API that this game uses.
+    """
+    error = Exception
+    A_BOLD, A_REVERSE, A_DIM = 1 << 8, 1 << 9, 1 << 10
+    COLOR_BLACK, COLOR_RED, COLOR_GREEN, COLOR_YELLOW = 0, 1, 2, 3
+    COLOR_BLUE, COLOR_MAGENTA, COLOR_CYAN, COLOR_WHITE = 4, 5, 6, 7
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER = 259, 258, 260, 261, 343
+    _ARROWS = {"H": KEY_UP, "P": KEY_DOWN, "K": KEY_LEFT, "M": KEY_RIGHT}
+
+    def __init__(self):
+        self.pairs = {}
+
+    def curs_set(self, n): pass
+    def has_colors(self): return True
+    def start_color(self): pass
+    def use_default_colors(self): pass
+    def init_pair(self, n, fg, bg): self.pairs[n] = fg
+    def color_pair(self, n): return n
+
+    def sgr(self, attr):
+        codes = ["0"]
+        if attr & self.A_BOLD: codes.append("1")
+        if attr & self.A_DIM: codes.append("2")
+        if attr & self.A_REVERSE: codes.append("7")
+        if (attr & 0xFF) in self.pairs:
+            codes.append(str(30 + self.pairs[attr & 0xFF]))
+        return "\x1b[" + ";".join(codes) + "m"
+
+    def wrapper(self, fn):
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        out = k32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if k32.GetConsoleMode(out, ctypes.byref(mode)):
+            k32.SetConsoleMode(out, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        w = sys.__stdout__.write
+        w("\x1b[?1049h\x1b[?25l\x1b[2J")  # alternate screen, hide cursor
+        sys.__stdout__.flush()
+        try:
+            return fn(_VTScreen(self))
+        finally:
+            w("\x1b[0m\x1b[?25h\x1b[?1049l")
+            sys.__stdout__.flush()
+
+
+class _VTScreen:
+    def __init__(self, c):
+        self.c = c
+        self.prev = []      # rows last sent to the terminal
+        self.size = None
+        self.full = True
+        self._measure()
+        self.erase()
+
+    def _measure(self):
+        try:
+            sz = os.get_terminal_size(sys.__stdout__.fileno())
+            size = (sz.lines, sz.columns)
+        except OSError:
+            size = (24, 80)
+        if size != self.size:
+            self.size, self.full = size, True
+
+    def nodelay(self, b): pass
+    def keypad(self, b): pass
+    def clear(self): self.full = True
+    def clearok(self, b): self.full = self.full or b
+    def getmaxyx(self): return self.size
+
+    def erase(self):
+        self._measure()  # once per frame, picks up pane resizes
+        h, w = self.size
+        self.cells = [[(" ", 0)] * w for _ in range(h)]
+
+    def addstr(self, y, x, s, attr=0):
+        h, w = self.size
+        if not 0 <= y < h:
+            return
+        row = self.cells[y]
+        for i, ch in enumerate(s):
+            if 0 <= x + i < w:
+                row[x + i] = (ch, attr)
+
+    def refresh(self):
+        h, w = self.size
+        out = ["\x1b[?2026h"]  # begin synchronized update
+        if self.full:
+            out.append("\x1b[0m\x1b[2J")
+            self.prev = []
+        new = []
+        for y, row in enumerate(self.cells):
+            parts, cur = [], None
+            for ch, a in row[: w - 1]:  # never touch the last column (auto-wrap)
+                if a != cur:
+                    parts.append(self.c.sgr(a))
+                    cur = a
+                parts.append(ch)
+            line = "".join(parts)
+            new.append(line)
+            if y >= len(self.prev) or self.prev[y] != line:
+                out.append("\x1b[%d;1H%s\x1b[0m\x1b[K" % (y + 1, line))
+        out.append("\x1b[?2026l")
+        self.prev, self.full = new, False
+        sys.__stdout__.write("".join(out))
+        sys.__stdout__.flush()
+
+    def getch(self):
+        import msvcrt
+        if not msvcrt.kbhit():
+            return -1
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            return self.c._ARROWS.get(msvcrt.getwch(), -1)
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        return ord(ch)
+
+
+if os.name == "nt":
+    curses = _VTCurses()
+else:
+    import curses
 
 HOME = os.path.dirname(os.path.abspath(__file__))
 SCORE_FILE = os.path.join(HOME, "highscore")
 STATE = sys.argv[1] if len(sys.argv) > 1 else None        # file written by the hooks
-CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane running Claude
+CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane running Claude, or "wt"
+ALIVE = STATE + ".alive" if STATE else None               # heartbeat the Windows hook checks
 FPS = 30
 DT = 1.0 / FPS
 KW, KH, MAX_HP = 3, 3, 5
+# Smallest playable pane: HUD row + jump apex (knight top = ground-4) + ground line.
+# A 40% Windows Terminal split of a non-maximized window is often only 8-9 rows.
+MIN_W, MIN_H = 36, 7
 
 KINDS = {
     "imp":   dict(w=3, h=2, hp=1, speed=11.0, dmg=1, windup=0.40, score=10, col=1,
@@ -47,6 +181,22 @@ def read_state():
         return (os.stat(STATE).st_mtime_ns, open(STATE).read().strip())
     except Exception:
         return None
+
+
+def heartbeat():
+    if ALIVE:
+        try:
+            open(ALIVE, "w").close()
+        except Exception:
+            pass
+
+
+def focus_claude():
+    if CLAUDE_PANE == "wt":
+        subprocess.Popen(["wt", "-w", "0", "move-focus", "up"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    elif CLAUDE_PANE:
+        subprocess.call(["tmux", "select-pane", "-t", CLAUDE_PANE])
 
 
 class Game:
@@ -274,6 +424,9 @@ def main(scr):
     move_until = {-1: 0.0, 1: 0.0}
     block_until = 0.0
     frame = 0
+    frame_all = 1  # counts paused frames too (for the safety repaint)
+    last_size = None
+    repaint_until = time.time() + 1.5  # new WT panes grow just after start
 
     def held(key, now, first, repeat):
         """Terminals send no key-up events, so emulate holding via key repeat."""
@@ -285,6 +438,17 @@ def main(scr):
         t0 = time.time()
         if not (paused or banner):
             frame += 1
+        if int(t0) != int(t0 - DT):
+            heartbeat()
+        # Windows: the VT screen re-measures the pane in erase(). WT can reflow a
+        # pane on its own, so resend everything after a resize and every 5 s.
+        if os.name == "nt":
+            if scr.getmaxyx() != last_size:
+                last_size = scr.getmaxyx()
+                repaint_until = t0 + 0.5
+            if (t0 < repaint_until and frame_all % 5 == 0) or frame_all % (FPS * 5) == 0:
+                scr.clearok(True)
+            frame_all += 1
         h, w = scr.getmaxyx()
         g.w = w
         ground = h - 2
@@ -307,8 +471,7 @@ def main(scr):
             if banner:
                 if k in (10, 13, curses.KEY_ENTER):
                     banner, paused = None, True
-                    if CLAUDE_PANE:
-                        subprocess.call(["tmux", "select-pane", "-t", CLAUDE_PANE])
+                    focus_claude()
                 elif k in (ord("p"), ord("P")):
                     banner, paused = None, False
                 continue
@@ -338,9 +501,10 @@ def main(scr):
 
         now = time.time()
         blocking = now < block_until and g.atk_t <= 0 and not g.dead
-        if h < 10 or w < 50:
+        if h < MIN_H or w < MIN_W:
             scr.erase()
-            put(scr, 0, 0, "Make this pane bigger (50x10 min)")
+            put(scr, 0, 0, "Pane is %dx%d - need %dx%d" % (w, h, MIN_W, MIN_H))
+            put(scr, 1, 0, "Make it bigger, or q to quit")
             scr.refresh()
             time.sleep(0.1)
             continue
@@ -393,7 +557,7 @@ def main(scr):
             msg = " Wave %d incoming... " % (g.wave + 1)
         if msg:
             put(scr, max(1, h // 2 - 2), max(0, (w - len(msg)) // 2), msg, curses.A_REVERSE)
-        if not banner:
+        if not banner and h >= 10:  # in a short pane row 1 is needed for the jump
             tip = "A/D move  W jump  J sword  K shield  P pause  Q quit"
             put(scr, 1, max(0, w - len(tip) - 2), tip, curses.A_DIM)
         scr.refresh()
@@ -401,7 +565,14 @@ def main(scr):
 
 
 if __name__ == "__main__":
+    heartbeat()
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
         pass
+    finally:
+        if ALIVE:
+            try:
+                os.remove(ALIVE)
+            except Exception:
+                pass

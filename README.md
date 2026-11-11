@@ -10,6 +10,7 @@ while it is working, driven by Claude Code hooks - like the offline dinosaur in 
 
 ## Needs
 macOS / Linux / WSL, Python 3, tmux, and Claude Code started inside tmux.
+The knight game also runs natively on Windows inside Windows Terminal - see [`knight/`](knight).
 
 ## Install one
     cd knight        # or: cd dino

@@ -22,7 +22,8 @@ hooks = settings.setdefault("hooks", {})
 
 for ev in EVENTS:  # drop any earlier game hooks
     kept = [g for g in hooks.get(ev, [])
-            if not any(m in h.get("command", "") for h in g.get("hooks", []) for m in MARKS)]
+            if not any(m in h.get("command", "").replace("\\", "/")
+                       for h in g.get("hooks", []) for m in MARKS)]
     if kept:
         hooks[ev] = kept
     else:
@@ -34,14 +35,21 @@ else:
     os.makedirs(DEST, exist_ok=True)
     for name in ("knight.py", "hook.py"):
         shutil.copy(os.path.join(SRC, name), os.path.join(DEST, name))
+    # forward slashes work in both cmd and Git Bash, and keep MARKS matching on Windows
+    py = sys.executable.replace("\\", "/")
+    hook = os.path.join(DEST, "hook.py").replace("\\", "/")
     for ev, arg in EVENTS.items():
         hooks.setdefault(ev, []).append({"hooks": [{
             "type": "command",
-            "command": 'python3 "%s" %s' % (os.path.join(DEST, "hook.py"), arg),
+            "command": '"%s" "%s" %s' % (py, hook, arg),
             "timeout": 5}]})
 if not hooks:
     settings.pop("hooks", None)
 with open(SETTINGS, "w") as f:
     json.dump(settings, f, indent=2)
-print("Removed." if uninstall else
-      "Installed. Start tmux, run `claude` inside it, and send a prompt.")
+if uninstall:
+    print("Removed.")
+elif os.name == "nt":
+    print("Installed. Open Windows Terminal, run `claude` in it, and send a prompt.")
+else:
+    print("Installed. Start tmux, run `claude` inside it, and send a prompt.")

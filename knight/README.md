@@ -4,12 +4,21 @@ A 2D terminal brawler that opens under Claude Code while it works and pauses
 whenever Claude is waiting for your prompt.
 
 ## Needs
-macOS / Linux / WSL, Python 3, tmux, and Claude Code started **inside tmux**.
+- macOS / Linux / WSL: Python 3, tmux, and Claude Code started **inside tmux**.
+- Windows 10/11: Python 3 and Claude Code started **inside Windows Terminal**
+  (`winget install Microsoft.WindowsTerminal` on Windows 10). No extra packages:
+  on Windows the game draws with VT escape codes itself.
 
 ## Install
-    python3 install.py
+    python3 install.py        # Windows: python install.py
 Restart Claude Code. This replaces the dino game's hooks if you installed it.
 Remove with `python3 install.py uninstall` (settings.json is backed up first).
+The hooks run with the Python that ran the installer.
+
+### Windows Terminal notes
+The game opens in a split pane below Claude. Windows Terminal can't target a pane by id,
+so focus moves by direction: if you rearrange panes, Enter may not land on Claude
+(just click it).
 
 ## Controls
 | Key | Action |
