@@ -44,6 +44,28 @@ def wt_exe():
     return shutil.which("wt.exe" if IS_WSL else "wt")
 
 
+WT_TERMINAL_GUID = "{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}"  # Windows Terminal's handoff class
+
+
+def wt_is_default():
+    """Windows Terminal set as the default terminal: consoles opened from the Start menu,
+    Run box or WSL launcher land in it too, but without WT_SESSION. The window the
+    prompt was just typed in is then the most recently used one, so "-w 0" finds it."""
+    try:
+        if os.name == "nt":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Console\%%Startup") as k:
+                return winreg.QueryValueEx(k, "DelegationTerminal")[0].upper() == WT_TERMINAL_GUID
+        if IS_WSL:
+            reg = shutil.which("reg.exe") or "/mnt/c/Windows/System32/reg.exe"
+            out = subprocess.run([reg, "query", r"HKCU\Console\%%Startup", "/v", "DelegationTerminal"],
+                                 capture_output=True, text=True, timeout=3).stdout
+            return WT_TERMINAL_GUID in out.upper()
+    except Exception:
+        pass
+    return False
+
+
 def game_cmd(state, mode):
     """The command line that runs the game, as seen from Windows when we are in WSL."""
     cmd = [sys.executable, GAME, state, mode]
@@ -97,7 +119,9 @@ def run_heartbeat(action, data, mode):
         alive = False
 
     if action != "start":
-        if alive or action == "end":
+        # also while the game is still starting (a quick answer can beat a new window):
+        # it reads the state file on startup and opens paused
+        if alive or os.path.exists(state):
             open(state, "w").write({"stop": "done", "notify": "notify", "end": "quit"}.get(action, "run"))
         return
     open(state, "w").write("run")
@@ -158,7 +182,7 @@ def main():
     pane = os.environ.get("TMUX_PANE")
     if os.environ.get("TMUX") and pane and shutil.which("tmux"):
         run_tmux(action, pane)
-    elif os.environ.get("WT_SESSION") and not in_vscode() and wt_exe():
+    elif not in_vscode() and wt_exe() and (os.environ.get("WT_SESSION") or wt_is_default()):
         run_heartbeat(action, data, "wt")
     else:
         run_heartbeat(action, data, "window")

@@ -4,24 +4,63 @@ A 2D terminal brawler that opens under Claude Code while it works and pauses
 whenever Claude is waiting for your prompt.
 
 ## Install (plugin)
-In Claude Code:
+From any terminal (PowerShell, bash, WSL):
 
-    /plugin install knight-game --marketplace shaico92/testingProjects
+    claude plugin marketplace add shaico92/testingProjects
+    claude plugin install knight-game@waiting-games
 
-(Older Claude Code: `/plugin marketplace add shaico92/testingProjects`, then
-`/plugin install knight-game@waiting-games`.) Restart Claude Code and send a prompt.
-Remove with `/plugin uninstall knight-game`.
+or inside Claude Code: `/plugin install knight-game --marketplace shaico92/testingProjects`
+(type exactly that - nothing after it). Restart Claude Code and send a prompt.
+Remove with `claude plugin uninstall knight-game`; update with `claude plugin update knight-game`.
 
 Needs **Python 3** on the PATH (`python3`, `python` or `py`) - nothing else.
 Used `install.py` before? Run `python install.py uninstall` first, or the game opens twice.
+WSL and Windows are separate installs: run the two commands in each one you use.
+
+## Setting up a new PC
+**Windows 10 / 11** (PowerShell):
+
+    winget install Python.Python.3.13
+    winget install Git.Git
+    winget install Microsoft.WindowsTerminal
+    irm https://claude.ai/install.ps1 | iex
+
+Then make Windows Terminal the default terminal, so `cmd`, `python` and anything else
+that opens a console - including the game's own window - opens in Windows Terminal:
+
+    $k = 'HKCU:\Console\%%Startup'; if (!(Test-Path $k)) { New-Item $k | Out-Null }
+    Set-ItemProperty $k DelegationConsole '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}'
+    Set-ItemProperty $k DelegationTerminal '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
+
+(Same as Windows Terminal > Settings > Startup > Default terminal application >
+Windows Terminal. Works on Windows 11 and on Windows 10 22H2; to undo, set both values
+to `{00000000-0000-0000-0000-000000000000}`, which means "let Windows decide".
+`python install.py terminal` / `terminal-undo` does the same from a clone of this repo.)
+
+Open a **new** Windows Terminal and run the two `claude plugin` commands above.
+
+**Linux / WSL** (Ubuntu/Debian; Fedora: `dnf`):
+
+    sudo apt install -y python3 git tmux
+    curl -fsSL https://claude.ai/install.sh | bash
+
+then the two `claude plugin` commands. Run `claude` inside `tmux` (or, in WSL, inside
+Windows Terminal) for a split pane.
+
+**VS Code**: set up the OS as above, then install the Claude Code extension. Plugins
+are per user, so the extension picks up the game; it opens in its own window.
 
 ## Where it opens
 | You run Claude Code in | The game opens |
 |---|---|
 | tmux (Linux, macOS, WSL) | a pane below Claude; Enter jumps back to Claude |
 | Windows Terminal (Windows 10/11, or WSL inside it) | a split pane below Claude; Enter jumps back |
+| a Start-menu / Run window (cmd, PowerShell, WSL) with Windows Terminal as the default terminal | a split pane below Claude, same as above |
 | VS Code (the Claude extension, or `claude` in VS Code's terminal) | its own Windows Terminal / terminal window |
 | any other terminal (Windows console, Linux desktop, macOS Terminal) | its own window |
+
+A WSL or cmd window opened *before* Windows Terminal became the default terminal is an
+old console that can't be split: close it and open a new one.
 
 The game pauses when Claude finishes or asks you something, resumes on your next
 prompt, and closes when the Claude session ends. In its own window there is no pane to
@@ -37,7 +76,9 @@ panes, Enter may not land on Claude (just click it).
 ### Without the plugin system
     python3 install.py        # Windows: python install.py
 copies the game to `~/.claude/knight-game` and adds the same hooks to
-`~/.claude/settings.json` (backed up first). Remove with `python3 install.py uninstall`.
+`~/.claude/settings.json` (backed up first). On Windows it also makes Windows Terminal
+the default terminal (the old setting is saved and put back on uninstall).
+Remove with `python3 install.py uninstall`.
 
 ## Controls
 | Key | Action |
