@@ -172,9 +172,30 @@ def heartbeat():
             pass
 
 
+def _host_window():
+    """Windows: the Claude window (VS Code, desktop app, console) the hook saved, or None."""
+    if os.name != "nt" or not STATE:
+        return None
+    try:
+        with open(STATE + ".host") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def can_focus():
+    """Whether Enter can take you back to Claude. tmux and Windows Terminal panes: always.
+    Own window: only where we know the Claude window (Windows)."""
+    return CLAUDE_PANE != "window" or _host_window() is not None
+
+
 def focus_claude():
-    if CLAUDE_PANE == "window":
-        return  # its own window: nothing to move focus to
+    if CLAUDE_PANE == "window":  # its own window: bring the Claude window back
+        hwnd = _host_window()
+        if hwnd:
+            import winhost
+            winhost.activate(hwnd)
+        return
     if CLAUDE_PANE == "wt":
         subprocess.Popen(["wt" if os.name == "nt" else "wt.exe", "-w", "0", "move-focus", "up"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

@@ -9,7 +9,7 @@ import os, random, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import (curses, STATE, CLAUDE_PANE, ALIVE, read_state, heartbeat,  # noqa: E402
-                    focus_claude, is_menu_key, pick_game, run)
+                    focus_claude, can_focus, is_menu_key, pick_game, run)
 
 HOME = os.path.dirname(os.path.abspath(__file__))
 # kept outside the plugin folder, which is replaced on every plugin update
@@ -938,7 +938,7 @@ def main(scr):
                 put(scr, y0 + 1 + i, max(0, (w - len(title)) // 2 + 2), line, col(3) | curses.A_BOLD)
 
         msg = None
-        go = "  P = keep playing " if CLAUDE_PANE == "window" else "  Enter = go to Claude "
+        go = "  Enter = go to Claude " if can_focus() else "  P = keep playing "
         if banner == "done":
             msg = " PAUSED - Claude is waiting for your prompt." + go
         elif banner == "notify":

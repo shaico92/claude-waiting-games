@@ -5,7 +5,7 @@ import os, random, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import (curses, DATA, CLAUDE_PANE, read_state, heartbeat,  # noqa: E402
-                    focus_claude, is_menu_key, pick_game, run)
+                    focus_claude, can_focus, is_menu_key, pick_game, run)
 
 SCORE_FILE = os.path.join(DATA, "dino-highscore")
 FPS = 30
@@ -138,7 +138,7 @@ def main(scr):
         for x, ow, oh in g["obs"]:
             for r in range(oh):
                 put(scr, ground - r, int(x), "#" * ow)
-        go = "  P = keep playing " if CLAUDE_PANE == "window" else "  Enter = go to Claude "
+        go = "  Enter = go to Claude " if can_focus() else "  P = keep playing "
         msg = None
         if banner == "done":
             msg = " PAUSED - Claude is waiting for your prompt." + go

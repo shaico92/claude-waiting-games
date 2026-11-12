@@ -16,7 +16,7 @@ SETTINGS = os.path.join(CLAUDE, "settings.json")
 MARKS = ("waiting-games/app/hook.py", "knight-game/hook.py", "knight-game/hooks/run.sh",
          "dino-game/hook.py")  # also removes the older knight/dino installs
 EVENTS = {"UserPromptSubmit": "start", "Notification": "notify", "Stop": "stop", "SessionEnd": "end"}
-FILES = ("hook.py", "games.py", "common.py", os.path.join("hooks", "run.sh"),
+FILES = ("hook.py", "games.py", "common.py", "winhost.py", os.path.join("hooks", "run.sh"),
          os.path.join("knight", "knight.py"), os.path.join("dino", "dino.py"))
 
 
