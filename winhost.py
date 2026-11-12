@@ -18,10 +18,15 @@ def _api():
     u32.GetWindow.restype = wintypes.HWND
     u32.IsWindow.argtypes = u32.IsIconic.argtypes = u32.IsWindowVisible.argtypes = [wintypes.HWND]
     u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     u32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
     u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     u32.SetForegroundWindow.argtypes = [wintypes.HWND]
     u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    u32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    u32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    u32.BringWindowToTop.argtypes = [wintypes.HWND]
+    k32.GetCurrentThreadId.restype = wintypes.DWORD
     return ctypes, wintypes, k32, u32
 
 
@@ -90,6 +95,38 @@ def _windows_of(pid):
     return found
 
 
+def find_window(title):
+    """hwnd of the visible top-level window whose title is `title`, or None.
+
+    The game opens in a terminal window of its own, owned by Windows Terminal or by a
+    console host - never by the game's own process - so it is found by its title, which
+    the hook sets when it opens the window. An exact match wins over a window whose
+    title merely starts with it (Windows Terminal appends the tab count)."""
+    if os.name != "nt":
+        return None
+    try:
+        ctypes, wintypes, _, u32 = _api()
+        exact, prefix = [], []
+        proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def cb(hwnd, _):
+            n = u32.GetWindowTextLengthW(hwnd)
+            if n and u32.IsWindowVisible(hwnd) and not u32.GetWindow(hwnd, 4):  # GW_OWNER
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u32.GetWindowTextW(hwnd, buf, n + 1)
+                if buf.value == title:
+                    exact.append(hwnd)
+                elif buf.value.startswith(title):
+                    prefix.append(hwnd)
+            return True
+
+        u32.EnumWindows(proc(cb), 0)
+        wins = exact or prefix
+        return wins[0] if wins else None
+    except Exception:
+        return None
+
+
 def find_host_window():
     """(hwnd, how) of the window the user just typed the prompt in; (None, why) if unknown.
 
@@ -127,20 +164,35 @@ def exe_name(hwnd):
 
 
 def activate(hwnd):
-    """Bring a window to the front (restoring it if minimized). True if it now is."""
+    """Bring a window to the front (restoring it if minimized). True if it now IS the
+    foreground window - checked, never assumed.
+
+    Windows only grants the foreground to a process the user has just interacted with.
+    A hook's detached helper has had no input at all, so SetForegroundWindow reports
+    success and does nothing: the window stays behind the editor. Attaching to the
+    input queue of the thread that currently owns the foreground lifts that lock -
+    the two threads then share one input state, so we count as the foreground process.
+    """
     if os.name != "nt" or not hwnd:
         return False
     try:
-        _, _, _, u32 = _api()
+        _, _, k32, u32 = _api()
         if not u32.IsWindow(hwnd):
             return False
         if u32.IsIconic(hwnd):
             u32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        # Windows only lets the foreground process take focus; a tap on Alt makes it count
-        # the caller as having just received input.
-        u32.keybd_event(0x12, 0, 0, 0)
-        ok = u32.SetForegroundWindow(hwnd)
-        u32.keybd_event(0x12, 0, 2, 0)
-        return bool(ok)
+        fg = u32.GetForegroundWindow()
+        ours = k32.GetCurrentThreadId()
+        theirs = u32.GetWindowThreadProcessId(fg, None) if fg else 0
+        attached = bool(theirs and theirs != ours and u32.AttachThreadInput(ours, theirs, True))
+        try:
+            u32.keybd_event(0x12, 0, 0, 0)  # a tap on Alt, which also counts as input
+            u32.BringWindowToTop(hwnd)
+            u32.SetForegroundWindow(hwnd)
+            u32.keybd_event(0x12, 0, 2, 0)
+        finally:
+            if attached:
+                u32.AttachThreadInput(ours, theirs, False)
+        return int(u32.GetForegroundWindow() or 0) == int(hwnd)
     except Exception:
         return False

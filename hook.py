@@ -169,8 +169,42 @@ def run_heartbeat(action, data, mode):
             "cmd": [sys.executable, GAME, state, "vscode"]})
         if not sent and not alive:  # the extension went away since choose_mode()
             open_window(state)
-    elif not alive:
-        open_window(state)
+            focus_later(state)
+    else:  # a window of its own: open it if it is gone, and raise it either way
+        if not alive:
+            open_window(state)
+        focus_later(state)
+
+
+def focus_later(state):
+    """Start the detached helper below. The hook itself must return at once."""
+    try:
+        spawn([sys.executable, os.path.abspath(__file__), "focus-window", state])
+    except Exception:
+        pass
+
+
+def focus_window(state, deadline=8.0):
+    """Bring the game's own window to the front, once it has one.
+
+    A window opened from a hook appears behind the window the prompt was typed in, and a
+    game nobody can see is a game nobody plays. The tmux and Windows Terminal paths move
+    focus to the game the same way (select-pane / move-focus); this is that, for a window.
+    Windows Terminal creates the window a moment after the hook returns, so this runs
+    detached and waits for the game's heartbeat before looking for it."""
+    end = time.time() + deadline
+    while time.time() < end:
+        try:
+            if time.time() - os.stat(state + ".alive").st_mtime < 3:
+                break
+        except OSError:
+            pass
+        time.sleep(0.25)
+    else:
+        return  # the game never came up: leave the foreground alone
+    if winhost:
+        hwnd = winhost.find_window(TITLE)
+        _append("         raise %s: %s" % (TITLE, "ok" if winhost.activate(hwnd) else "not found"))
 
 
 def open_window(state):
@@ -211,6 +245,9 @@ def open_window(state):
 
 def main():
     action = sys.argv[1] if len(sys.argv) > 1 else ""
+    if action == "focus-window":  # spawned by focus_later(), not a hook: no JSON on stdin
+        focus_window(sys.argv[2] if len(sys.argv) > 2 else "")
+        return
     data = {}
     try:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}")
