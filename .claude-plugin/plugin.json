@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "waiting-games",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Terminal games that open while Claude works and pause when Claude waits for you: Knight vs Devils and Dino Run, switch with M. Windows 10/11, Linux, WSL, macOS and the VS Code extension.",
   "author": {
     "name": "shaico92"

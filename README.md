@@ -59,8 +59,9 @@ Open a **new** Windows Terminal and run the two `claude plugin` commands above.
 then the two `claude plugin` commands. Run `claude` inside `tmux` (or, in WSL, inside
 Windows Terminal) for a split pane.
 
-**VS Code**: set up the OS as above, then install the Claude Code extension. Plugins
-are per user, so the extension picks up the games; it opens in its own window.
+**VS Code** and the **Claude desktop app**: set up the OS as above, install the plugin,
+and restart the app or the extension (or run `/reload-plugins`). Plugins are per user, so
+both pick up the games; the game opens in its own window (see below).
 
 ## Where it opens
 | You run Claude Code in | The game opens |
@@ -68,15 +69,45 @@ are per user, so the extension picks up the games; it opens in its own window.
 | tmux (Linux, macOS, WSL) | a pane below Claude; Enter jumps back to Claude |
 | Windows Terminal (Windows 10/11, or WSL inside it) | a split pane below Claude; Enter jumps back |
 | a Start-menu / Run window (cmd, PowerShell, WSL) with Windows Terminal as the default terminal | a split pane below Claude, same as above |
-| VS Code (the Claude extension, or `claude` in VS Code's terminal) | its own Windows Terminal / terminal window |
+| VS Code (the Claude extension, or `claude` in VS Code's terminal) with the [companion extension](#vs-code-the-game-in-the-panel) | a terminal in VS Code's bottom panel; Enter jumps back to the Claude chat |
+| VS Code without the companion extension | its own Windows Terminal / terminal window; Enter jumps back to VS Code (Windows) |
+| the Claude desktop app (Code tab, local sessions) | its own Windows Terminal / terminal window; Enter jumps back to the app (Windows) |
 | any other terminal (Windows console, Linux desktop, macOS Terminal) | its own window |
+
+The hook tells these apart by the `CLAUDE_CODE_ENTRYPOINT` Claude Code sets (`cli` for a
+terminal, `claude-vscode` for the extension, anything else - the desktop app - is treated
+as "no terminal to split"), so a prompt in the app or in VS Code never splits an unrelated
+Windows Terminal window.
 
 A WSL or cmd window opened *before* Windows Terminal became the default terminal is an
 old console that can't be split: close it and open a new one.
 
 The game pauses when Claude finishes or asks you something, resumes on your next
-prompt, and closes when the Claude session ends. In its own window there is no pane to
-jump back to: click Claude (P keeps playing).
+prompt, and closes when the Claude session ends. In its own window on Windows, Enter
+brings the window you sent the prompt from back to the front; on macOS and Linux there is
+no way to find it, so click Claude (P keeps playing).
+
+### VS Code: the game in the panel
+The Claude chat panel is closed to plugins, so the game can't be drawn inside it. A small
+companion extension (`vscode/`, plain JavaScript) does the next best thing: the game opens as
+a terminal in VS Code's bottom panel, right under the chat, and Enter in the game puts you
+back in the chat (it runs the Claude extension's `claude-vscode.focus` command). Install it
+once, from a clone of this repo (or from the plugin folder under `~/.claude/plugins/cache`):
+
+    python3 install.py vscode        # needs `code` on the PATH; then: Developer: Reload Window
+
+Remove it with `python3 install.py vscode-uninstall`. It works with the VS Code extension and
+with `claude` typed in VS Code's terminal, and also in Cursor, Windsurf and VSCodium (their
+CLI is installed into too). Without it, or if it isn't running, the game opens in its own
+window as before. In WSL / SSH remote windows the extension runs on the remote side, next to Claude.
+
+### If the game doesn't open
+The hook writes one line per call to `%TEMP%\claude-games-hook.log` (`/tmp/claude-games-hook.log`
+elsewhere): which host it saw, which way it chose and, on Windows, the process chain and the
+window it saved. No line at all means Claude Code never ran the hook - in the desktop app that
+is a known gap in some versions, so use `python3 install.py` (hooks in `settings.json`, which
+the app also reads) instead of the plugin. Plugins are not available in the desktop app's
+WSL sessions.
 
 On Windows 10 without Windows Terminal the window is a classic console (still works);
 `winget install Microsoft.WindowsTerminal` gives the split pane. On a Linux server with

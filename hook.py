@@ -9,11 +9,22 @@ usage: hook.py start|notify|stop|end   - never prints, never fails the hook
 Where the game opens, first match wins:
   tmux              a pane below Claude (macOS, Linux, WSL)
   Windows Terminal  a split pane below Claude (Windows, or WSL inside Windows Terminal)
-  window            its own terminal window - the VS Code extension, VS Code's terminal,
-                    and any other terminal (Windows console, WSL, Linux desktop, macOS)"""
+  vscode            a terminal in VS Code's panel, made by the companion extension in vscode/
+                    (the VS Code extension, or `claude` in VS Code's terminal)
+  window            its own terminal window - the desktop app, VS Code without the companion
+                    extension, and any other terminal (Windows console, Linux desktop, macOS)"""
 import json, os, platform, shutil, subprocess, sys, tempfile, time
 
 HOME = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOME)
+try:  # Windows: find the Claude window, bring it back. Optional: the game works without it.
+    import winhost
+except Exception:
+    winhost = None
+try:  # the companion VS Code extension (vscode/): game as a terminal in VS Code's panel
+    import vscodebridge
+except Exception:
+    vscodebridge = None
 GAME = os.path.join(HOME, "games.py")
 TITLE = "Waiting games"
 IS_WSL = sys.platform.startswith("linux") and (
@@ -32,12 +43,26 @@ def spawn(cmd, **kw):
     return subprocess.Popen(cmd, start_new_session=True, **QUIET, **kw)
 
 
-def in_vscode():
-    """The VS Code extension (and VS Code's own terminal) has no pane we can split."""
-    e = os.environ
-    return ("vscode" in e.get("CLAUDE_CODE_ENTRYPOINT", "").lower()
-            or e.get("TERM_PROGRAM") == "vscode"
-            or "VSCODE_PID" in e or "VSCODE_IPC_HOOK" in e or "VSCODE_IPC_HOOK_CLI" in e)
+def entrypoint():
+    return os.environ.get("CLAUDE_CODE_ENTRYPOINT", "").lower()
+
+
+def host():
+    """Where this Claude Code is running. Only a real terminal has a pane to split.
+      terminal         a terminal running `claude` (WT, tmux, WSL, Terminal.app, ...)
+      vscode-terminal  `claude` typed in VS Code's integrated terminal
+      vscode           the VS Code extension (sets CLAUDE_CODE_ENTRYPOINT=claude-vscode)
+      desktop          the Claude desktop app's Code tab, or any other non-terminal host
+                       (anything that sets an entrypoint other than "cli")"""
+    e, ep = os.environ, entrypoint()
+    if "vscode" in ep:
+        return "vscode"
+    if ep not in ("", "cli"):
+        return "desktop"
+    if (e.get("TERM_PROGRAM") == "vscode" or "VSCODE_PID" in e
+            or "VSCODE_IPC_HOOK" in e or "VSCODE_IPC_HOOK_CLI" in e):
+        return "vscode-terminal"
+    return "terminal"
 
 
 def wt_exe():
@@ -125,6 +150,11 @@ def run_heartbeat(action, data, mode):
             open(state, "w").write({"stop": "done", "notify": "notify", "end": "quit"}.get(action, "run"))
         return
     open(state, "w").write("run")
+    if mode == "window":
+        try:
+            save_host_window(state)
+        except Exception:
+            pass
     if mode == "wt":
         wt = wt_exe()
         if alive:
@@ -132,6 +162,13 @@ def run_heartbeat(action, data, mode):
         else:
             spawn([wt, "-w", "0", "split-pane", "-H", "-s", "0.4", "--title", TITLE]
                   + game_cmd(state, "wt"))
+    elif mode == "vscode":  # a terminal in VS Code's panel, made by the companion extension
+        ext = vscode_extension(data)
+        sent = ext and vscodebridge.send(ext, {
+            "type": "show" if alive else "open", "state": state, "name": TITLE, "cwd": HOME,
+            "cmd": [sys.executable, GAME, state, "vscode"]})
+        if not sent and not alive:  # the extension went away since choose_mode()
+            open_window(state)
     elif not alive:
         open_window(state)
 
@@ -179,13 +216,87 @@ def main():
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}")
     except Exception:
         pass
-    pane = os.environ.get("TMUX_PANE")
-    if os.environ.get("TMUX") and pane and shutil.which("tmux"):
-        run_tmux(action, pane)
-    elif not in_vscode() and wt_exe() and (os.environ.get("WT_SESSION") or wt_is_default()):
-        run_heartbeat(action, data, "wt")
+    mode = choose_mode(data)
+    log(action, data, mode)
+    if mode == "window" and host() in ("vscode", "vscode-terminal"):
+        _append("         no live Waiting Games VS Code extension for this window: "
+                "separate window (install it with: python3 install.py vscode)")
+    if mode == "tmux":
+        run_tmux(action, os.environ["TMUX_PANE"])
     else:
-        run_heartbeat(action, data, "window")
+        run_heartbeat(action, data, mode)
+
+
+def choose_mode(data=None):
+    """tmux | wt | vscode | window, from where Claude Code runs. The Windows Terminal split
+    needs a terminal to split: a hook from the desktop app or the VS Code extension must
+    never split whichever Windows Terminal window happens to be the most recent one.
+    In VS Code the game goes into the panel if the companion extension is running."""
+    kind, e = host(), os.environ
+    if kind in ("terminal", "vscode-terminal") and e.get("TMUX") and e.get("TMUX_PANE") \
+            and shutil.which("tmux"):
+        return "tmux"
+    if kind == "terminal" and wt_exe():
+        # WT_SESSION is set inside Windows Terminal. Without it the console may still
+        # have been handed to WT as the default terminal - but only trust that for a
+        # plain CLI, whose entrypoint is exactly "cli".
+        if e.get("WT_SESSION") or (entrypoint() == "cli" and wt_is_default()):
+            return "wt"
+    if kind in ("vscode", "vscode-terminal") and vscode_extension(data):
+        return "vscode"
+    return "window"
+
+
+def vscode_extension(data):
+    """pid of the live companion extension for this Claude, or None."""
+    return vscodebridge.find_extension((data or {}).get("cwd")) if vscodebridge else None
+
+
+# ------------------------------------------------------------------ diagnostics
+LOG = os.path.join(tempfile.gettempdir(), "claude-games-hook.log")
+
+
+def ancestors():
+    """Names of the processes above this one (Windows only): python <- claude <- Code ..."""
+    return ["%s(%d)" % (name, pid) for pid, name in winhost.process_chain()] if winhost else []
+
+
+def _append(line):
+    try:
+        with open(LOG, encoding="utf-8") as f:
+            lines = f.read().splitlines()[-199:]
+    except OSError:
+        lines = []
+    try:
+        with open(LOG, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines + [line.rstrip()]) + "\n")
+    except OSError:
+        pass
+
+
+def log(action, data, mode):
+    """One line per hook call in %TEMP%/claude-games-hook.log, so "the game didn't open"
+    can be answered from facts: which host the hook saw and which way it chose."""
+    try:
+        e = os.environ
+        _append("%s %-6s mode=%-6s host=%s entry=%s term=%s wt=%s tmux=%s session=%s chain=%s" % (
+            time.strftime("%H:%M:%S"), action, mode, host(), entrypoint() or "-",
+            e.get("TERM_PROGRAM", "-"), "y" if e.get("WT_SESSION") else "n",
+            "y" if e.get("TMUX") else "n", (data.get("session_id") or "-")[:8],
+            " < ".join(ancestors()) or "-"))
+    except Exception:
+        pass
+
+
+def save_host_window(state):
+    """Remember which window the prompt was typed in, so Enter in the game can go back."""
+    if not winhost:
+        return
+    hwnd, how = winhost.find_host_window()
+    if hwnd:
+        with open(state + ".host", "w") as f:
+            f.write(str(int(hwnd)))
+    _append("         host window: %s%s" % (how, " exe=" + winhost.exe_name(hwnd) if hwnd else ""))
 
 
 if __name__ == "__main__":
