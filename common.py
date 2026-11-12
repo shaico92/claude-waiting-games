@@ -3,7 +3,7 @@ protocol (state file, heartbeat, focus), and the game picker.
 
 argv (set by hook.py): <state file> <claude pane: tmux pane id, "wt" or "window">
 """
-import os, subprocess, sys, time
+import os, re, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 for _d in ("knight", "dino"):
@@ -76,6 +76,7 @@ class _VTScreen:
         self.prev = []      # rows last sent to the terminal
         self.size = None
         self.full = True
+        self._con = None    # _ConsoleInput, or False when stdin is not a console
         self._measure()
         self.erase()
 
@@ -132,6 +133,10 @@ class _VTScreen:
         sys.__stdout__.flush()
 
     def getch(self):
+        if self._con is None:
+            self._con = _ConsoleInput.open() or False
+        if self._con:
+            return self._con.getch()
         import msvcrt
         if not msvcrt.kbhit():
             return -1
@@ -143,10 +148,214 @@ class _VTScreen:
         return ord(ch)
 
 
+class _ConsoleInput:
+    """Windows: read the console's input records instead of msvcrt's characters.
+    Records carry key UP as well, so KEYS knows what is held (see KeyTracker)."""
+
+    @classmethod
+    def open(cls):
+        try:
+            return cls()
+        except Exception:
+            return None
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        class KEY(ctypes.Structure):
+            _fields_ = [("down", wintypes.BOOL), ("repeat", wintypes.WORD), ("vk", wintypes.WORD),
+                        ("scan", wintypes.WORD), ("ch", wintypes.WCHAR), ("state", wintypes.DWORD)]
+
+        class EV(ctypes.Union):
+            _fields_ = [("key", KEY), ("focus", wintypes.BOOL), ("pad", ctypes.c_byte * 16)]
+
+        class REC(ctypes.Structure):
+            _fields_ = [("type", wintypes.WORD), ("ev", EV)]
+
+        self.c = ctypes
+        k32 = self.k32 = ctypes.WinDLL("kernel32")
+        k32.GetStdHandle.restype = wintypes.HANDLE
+        k32.GetStdHandle.argtypes = [wintypes.DWORD]
+        k32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.GetNumberOfConsoleInputEvents.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.ReadConsoleInputW.argtypes = [wintypes.HANDLE, ctypes.POINTER(REC), wintypes.DWORD,
+                                          ctypes.POINTER(wintypes.DWORD)]
+        self.h = k32.GetStdHandle(wintypes.DWORD(-10 & 0xFFFFFFFF))   # STD_INPUT_HANDLE
+        mode = wintypes.DWORD()
+        if not k32.GetConsoleMode(self.h, ctypes.byref(mode)):
+            raise OSError("stdin is not a console")
+        self.buf, self.n, self.queue = (REC * 64)(), wintypes.DWORD(), []
+
+    def getch(self):
+        if not self.queue:
+            self._pump()
+        return self.queue.pop(0) if self.queue else -1
+
+    def _pump(self):
+        k32, c = self.k32, self.c
+        if not k32.GetNumberOfConsoleInputEvents(self.h, c.byref(self.n)) or not self.n.value:
+            return
+        if not k32.ReadConsoleInputW(self.h, self.buf, 64, c.byref(self.n)):
+            return
+        for r in self.buf[:self.n.value]:
+            if r.type == 0x0001:      # KEY_EVENT
+                k = r.ev.key
+                self.queue += key_event(bool(k.down), k.vk, ord(k.ch) if k.ch else 0, k.repeat)
+            elif r.type == 0x0010 and not r.ev.focus:   # FOCUS_EVENT: lost focus
+                KEYS.clear()
+
+
 if os.name == "nt":
     curses = _VTCurses()
 else:
     import curses
+
+
+class KeyTracker:
+    """Which keys are physically held right now, from real key-down/up events.
+
+    A terminal normally sends characters only: a held key shows up as OS auto-repeat,
+    and pressing a second key stops the first key's repeat - so a game that guesses
+    "held" from the repeats loses the run key the moment you stab or jump.
+    Windows consoles (and Windows Terminal's win32-input-mode) report key UP as well.
+    Hosts that only see text (VS Code's terminal) fake an up right after every down, so
+    `real` switches on only once the input proves it: an up arriving well after its
+    down, or a key repeating with no up in between. Until then since() says None and the
+    game keeps its key-repeat emulation.
+    """
+    STALE = 10.0    # no key event at all for this long: assume the ups were lost
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.down = {}      # key id -> when it went down
+        self.real = False
+        self.last = 0.0
+
+    def event(self, key, is_down):
+        now = self.last = self.clock()
+        if is_down:
+            if key in self.down:
+                self.real = True    # auto-repeat with no up in between
+            else:
+                self.down[key] = now
+        else:
+            t = self.down.pop(key, None)
+            if t is not None and now - t >= 0.03:
+                self.real = True
+
+    def clear(self):
+        """Focus left the game: ups for the held keys will go somewhere else."""
+        self.down.clear()
+
+    def since(self, keys):
+        """When the latest-pressed of `keys` went down if one is held, else None.
+        None also while key-ups aren't known to be real."""
+        if not self.real or self.clock() - self.last > self.STALE:
+            return None
+        ts = [self.down[k] for k in keys if k in self.down]
+        return max(ts) if ts else None
+
+
+KEYS = KeyTracker()
+
+# virtual-key codes -> what getch() returns (curses KEY_LEFT/UP/RIGHT/DOWN)
+_VK_ARROWS = {0x25: 260, 0x26: 259, 0x27: 261, 0x28: 258}
+
+
+def _key_id(vk):
+    """Layout-free id of a key for KEYS: its lowercase letter / digit / space, or arrow code."""
+    if vk in _VK_ARROWS:
+        return _VK_ARROWS[vk]
+    if 0x41 <= vk <= 0x5A:
+        return vk + 32
+    if 0x30 <= vk <= 0x39 or vk == 0x20:
+        return vk
+    return None
+
+
+def key_event(is_down, vk, ch, repeat=1):
+    """One key event (a console record, or a win32-input-mode sequence): updates KEYS and
+    returns the presses getch() should report for it."""
+    kid = _key_id(vk)
+    if kid is not None:
+        KEYS.event(kid, is_down)
+    if not is_down:
+        return []
+    if ch == 3:
+        raise KeyboardInterrupt
+    if vk in _VK_ARROWS:
+        code = _VK_ARROWS[vk]
+    elif vk == 0x0D:
+        code = 13
+    elif ch:
+        code = ch
+    else:
+        return []           # shift, ctrl, ... on their own
+    return [code] * max(1, min(repeat, 4))
+
+
+# win32-input-mode: CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _
+_W32 = re.compile(r"\x1b\[(\d*);(\d*);(\d*);(\d*);(\d*)(?:;(\d*))?_")
+_PARTIAL = re.compile(r"\x1b(\[[\d;]*)?$")
+
+
+def parse_input(buf, flush):
+    """Turn raw getch() codes into presses, decoding win32-input-mode key events and
+    focus reports (ESC [ I / ESC [ O) on the way. `buf` is consumed in place; a
+    sequence cut in half stays in it for the next call, unless `flush`."""
+    out = []
+    while buf:
+        if buf[0] == 27:
+            s = "".join(chr(c) if c < 256 else "\0" for c in buf[:64])
+            m = _W32.match(s)
+            if m:
+                vk, _, uc, kd, _, rc = m.groups()
+                del buf[:m.end()]
+                out += key_event(kd == "1", int(vk or 0), int(uc or 0), int(rc or 1))
+                continue
+            if s.startswith(("\x1b[I", "\x1b[O")):
+                if s[2] == "O":
+                    KEYS.clear()
+                del buf[:3]
+                continue
+            if not flush and _PARTIAL.match(s):
+                break       # the rest of the sequence is still on its way
+        out.append(buf.pop(0))
+    return out
+
+
+class _WinInputScreen:
+    """Linux/WSL inside Windows Terminal: wraps the curses screen. The terminal is asked
+    for win32-input-mode (key down AND up) and focus reports; if it ignores the request
+    keys arrive as plain characters and pass straight through."""
+    ON, OFF = "\x1b[?9001h\x1b[?1004h", "\x1b[?9001l\x1b[?1004l"
+
+    def __init__(self, scr):
+        self.scr, self.buf, self.queue, self.t = scr, [], [], 0.0
+
+    def __getattr__(self, name):
+        return getattr(self.scr, name)
+
+    def getch(self):
+        if not self.queue:
+            while True:
+                c = self.scr.getch()
+                if c == -1:
+                    break
+                if not self.buf:
+                    self.t = time.time()
+                self.buf.append(c)
+            self.queue += parse_input(self.buf, time.time() - self.t > 0.05)
+        return self.queue.pop(0) if self.queue else -1
+
+
+def _tty_write(s):
+    try:
+        sys.__stdout__.write(s)
+        sys.__stdout__.flush()
+    except Exception:
+        pass
 
 
 STATE = sys.argv[1] if len(sys.argv) > 1 else None        # file written by the hooks
@@ -211,6 +420,7 @@ def can_focus():
 
 
 def focus_claude():
+    KEYS.clear()    # the key-ups go to Claude's pane from here on
     if CLAUDE_PANE == "vscode":  # a terminal in VS Code's panel: the extension focuses the chat
         try:
             import vscodebridge
@@ -316,6 +526,17 @@ def run(first=None):
     heartbeat()
 
     def loop(scr):
+        nonlocal name
+        if os.name != "nt" and os.environ.get("WT_SESSION"):
+            scr = _WinInputScreen(scr)
+            _tty_write(_WinInputScreen.ON)
+        try:
+            games(scr)
+        finally:
+            if isinstance(scr, _WinInputScreen):
+                _tty_write(_WinInputScreen.OFF)
+
+    def games(scr):
         nonlocal name
         while name:
             try:

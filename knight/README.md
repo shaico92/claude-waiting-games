@@ -17,15 +17,20 @@ game opens are described there. Press **M** in game to switch to another game.
 | H or ? | **how to play** - controls, skills and enemies (pauses the game) |
 | T | **swap weapon** - sword, spear (long reach, slower), hammer (short, slow, 2 damage, breaks guard shields, staggers brutes) |
 | X | **combo finisher** - after a 6-kill combo: a free slash across the whole screen (3 damage to everything). Earned again every 6 kills of combo; lost if the combo breaks |
-| U or E | **dash** (1 MP) - quick, invulnerable, cuts enemies you pass |
+| U or E | **dash** (1 MP, 0.6 s cooldown) - quick, invulnerable, cuts enemies you pass |
 | I or R | **sword beam** (2 MP) - flies the way you face, pierces every enemy |
 | L or G | **spin** (3 MP) - 2 damage to everything close on both sides, swats fireballs |
 | P | pause / resume |
 | Q | quit |
 
-Hold A/D (or the arrows) to keep running: terminals send no key-up, so the game reads your
-OS key-repeat delay and rate (Windows settings) and keeps the knight going while repeats
-arrive. A single tap walks a few cells at half pace. A jump pressed just before landing still counts.
+Hold A/D (or the arrows) to keep running. On Windows the game reads real key-down and
+key-up events from its console, so you keep running while you stab, jump or cast, and the
+shield is up exactly while K is held. Linux/WSL inside Windows Terminal asks the terminal for
+the same events (win32-input-mode). Where a terminal sends only characters (VS Code's
+terminal, tmux, most Linux terminals) the game falls back to the OS key repeat: it reads the
+repeat delay and rate and keeps the knight going while repeats arrive - there, pressing
+another key stops the repeat, so the knight stops too. A single tap walks a few cells at half
+pace. A jump pressed just before landing still counts.
 
 ## How it flows
 - Send a prompt: the game opens (or resumes) and takes focus.
@@ -86,7 +91,7 @@ Getting hit resets it.
 
 ## Perks
 After each wave, pick one of three with 1 / 2 / 3 (the next wave waits for you):
-+1 max HP, full heal, longer sword, +2 max MP, faster mana, free dash, double-damage
++1 max HP, full heal, longer sword, +2 max MP, faster mana, cheap dash (a dash that kills refunds its MP), double-damage
 beam, wider spin. Perks last until you die.
 
 ## Mana

@@ -10,7 +10,7 @@ import os, random, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import (curses, STATE, CLAUDE_PANE, ALIVE, read_state, heartbeat,  # noqa: E402
-                    focus_claude, can_focus, is_menu_key, pick_game, run, key_repeat_timing)
+                    focus_claude, can_focus, is_menu_key, pick_game, run, key_repeat_timing, KEYS)
 
 HOME = os.path.dirname(os.path.abspath(__file__))
 # kept outside the plugin folder, which is replaced on every plugin update
@@ -40,6 +40,7 @@ RUN, ACCEL, TURN, FRICTION = 17.0, 110.0, 180.0, 60.0
 MAX_MP, MP_REGEN, MP_PER_KILL = 6, 2.5, 1       # MP_REGEN = seconds per point
 DASH_COST, BEAM_COST, SPIN_COST = 1, 2, 3
 DASH_TIME, DASH_SPEED = 0.18, 48.0
+DASH_CD = 0.6            # between dashes: the dash can't be chained into endless invulnerability
 BEAM_SPEED, SPIN_RANGE = 30.0, 5.0
 SWORD_REACH = 4
 RUN_STEP = 2.5        # cells walked per leg-cycle step
@@ -164,10 +165,15 @@ PERKS = {
     "reach": ("Longer sword", lambda g: g.reach < 8),
     "mana":  ("+2 max MP",    lambda g: g.max_mp < 10),
     "regen": ("Faster mana",  lambda g: g.regen > 1.2),
-    "dash":  ("Free dash",    lambda g: g.dash_cost > 0),
+    "dash":  ("Cheap dash",   lambda g: not g.dash_refund),   # a dash that kills refunds its MP
     "beam":  ("Beam hits x2", lambda g: g.beam_dmg < 2),
     "spin":  ("Wider spin",   lambda g: g.spin_range < 9),
 }
+
+# held-key ids (common.KEYS): lowercase letter, or the curses arrow code
+RIGHT_KEYS = (ord("d"), 261)
+LEFT_KEYS = (ord("a"), 260)
+SHIELD_KEYS = (ord("k"), ord("s"), 258)
 
 # the H screen: (text, color pair, is a heading). Lines fit a 36-column pane.
 HELP = [
@@ -243,6 +249,7 @@ class Game:
         self.stab_t = 0.0     # downward air stab visible
         self.parry_t = 0.0    # > 0 just after a fresh shield press
         self.dash_t, self.dash_dir, self.dash_hit = 0.0, 1, set()
+        self.dash_cd, self.dash_refund, self.dash_refunded = 0.0, False, False
         self.spin_t = 0.0     # spin pose visible
         self.enemies, self.hearts, self.sparks = [], [], []
         self.fire = []        # [x, vx, alive, reflected by a parry]
@@ -526,8 +533,11 @@ class Game:
 
     def dash(self):
         """Quick invulnerable dash the way you face; cuts every enemy it passes."""
+        if self.dash_cd > 0:
+            return
         if self.pay(self.dash_cost):
             self.dash_t, self.dash_dir, self.dash_hit = DASH_TIME, self.face, set()
+            self.dash_cd, self.dash_refunded = DASH_CD, False
             self.invuln = max(self.invuln, DASH_TIME + 0.1)
 
     def beam(self):
@@ -586,7 +596,7 @@ class Game:
         elif p == "regen":
             self.regen *= 0.7
         elif p == "dash":
-            self.dash_cost = 0
+            self.dash_refund = True
         elif p == "beam":
             self.beam_dmg = 2
         elif p == "spin":
@@ -601,7 +611,7 @@ class Game:
         leaves no room: enemies line up instead of stacking into one blob."""
         e = self.enemies[i]
         g, side = gaps[i]
-        for j, o in enumerate(self.enemies):
+        for j, o in enumerate(self.enemies[:len(gaps)]):   # imps a boss just summoned have no gap yet
             og, oside = gaps[j]
             if j == i or KINDS[o["kind"]].get("fly") or oside != side or (og, j) >= (g, i):
                 continue
@@ -739,6 +749,7 @@ class Game:
             self.freeze -= DT
             return
         self.invuln = max(0.0, self.invuln - DT)
+        self.dash_cd = max(0.0, self.dash_cd - DT)
         self.atk_t = max(0.0, self.atk_t - DT)
         self.atk_cd = max(0.0, self.atk_cd - DT)
         self.stab_t = max(0.0, self.stab_t - DT)
@@ -780,6 +791,9 @@ class Game:
                 if id(e) not in self.dash_hit and e["alt"] <= 1 and self.gap(e)[0] <= 0.5:
                     self.dash_hit.add(id(e))
                     self.hit(e, 1, self.dash_dir * 2, "dash")
+                    if self.dash_refund and e["hp"] <= 0 and not self.dash_refunded:
+                        self.dash_refunded = True   # once per dash
+                        self.mp = min(self.max_mp, self.mp + self.dash_cost)
         else:
             target = 0.0
             if mv and not blocking:
@@ -1299,7 +1313,14 @@ def main(scr):
                 block_until = held("B", now, max(0.5, first), 0.16)[0]
 
         now = time.time()
-        blocking = now < block_until and g.atk_t <= 0 and not g.dead
+        # real key-ups known (Windows console, WT win32-input-mode): read what is held, so
+        # running survives a stab or a jump. Otherwise: the key-repeat emulation above.
+        right, left = KEYS.since(RIGHT_KEYS), KEYS.since(LEFT_KEYS)
+        if KEYS.real:
+            shield_on = KEYS.since(SHIELD_KEYS) is not None
+        else:
+            shield_on = now < block_until
+        blocking = shield_on and g.atk_t <= 0 and not g.dead
         if h < MIN_H or w < MIN_W:
             scr.erase()
             put(scr, 0, 0, "Pane is %dx%d - need %dx%d" % (w, h, MIN_W, MIN_H))
@@ -1308,7 +1329,11 @@ def main(scr):
             time.sleep(0.1)
             continue
         if not (paused or banner or help_page is not None):
-            mv = 1 if now < move_until[1] else (-1 if now < move_until[-1] else 0)
+            if KEYS.real:
+                mv = 1 if right and (not left or right >= left) else (-1 if left else 0)
+                walk_speed = 1.0
+            else:
+                mv = 1 if now < move_until[1] else (-1 if now < move_until[-1] else 0)
             if now < jump_buf and g.y == 0 and not g.dead:
                 g.vy, jump_buf = JUMP_V, 0.0
             was_dead = g.dead

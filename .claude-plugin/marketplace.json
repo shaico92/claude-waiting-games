@@ -10,7 +10,7 @@
     {
       "name": "waiting-games",
       "source": "./",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "category": "fun",
       "description": "Knight vs Devils and Dino Run: open while Claude works, pause when Claude waits, switch games with M."
     }

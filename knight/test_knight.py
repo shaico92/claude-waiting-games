@@ -86,6 +86,47 @@ class Powers(unittest.TestCase):
         run(g, K.DASH_TIME + 0.05)
         self.assertLess(e["hp"], K.KINDS["devil"]["hp"])
 
+    def test_dash_has_a_cooldown(self):
+        # free-dash spam was endless invulnerability: the next dash waits DASH_CD
+        g = Game()
+        quiet(g)
+        g.mp = g.max_mp
+        g.dash()
+        mp = g.mp
+        run(g, K.DASH_TIME + 0.05)
+        g.dash()
+        self.assertEqual(g.mp, mp)             # refused: still cooling down
+        self.assertLessEqual(g.dash_t, 0)
+        run(g, K.DASH_CD)
+        g.dash()
+        self.assertEqual(g.mp, mp - K.DASH_COST)
+        self.assertGreater(g.dash_t, 0)
+
+    def test_cheap_dash_refunds_once_on_a_kill(self):
+        def after(refund):
+            random.seed(1)
+            g = Game()
+            quiet(g)
+            g.dash_refund = refund
+            a, b = place(g, "imp", 2), place(g, "imp", 3)
+            a["hp"] = b["hp"] = 1
+            g.mp = 2
+            g.dash()
+            run(g, K.DASH_TIME + 0.05)
+            self.assertLessEqual(a["hp"], 0)
+            self.assertLessEqual(b["hp"], 0)
+            return g.mp
+        self.assertEqual(after(True) - after(False), K.DASH_COST)   # two kills, one refund
+
+    def test_dash_without_a_kill_is_not_refunded(self):
+        g = Game()
+        quiet(g)
+        g.dash_refund = True
+        g.mp = 2
+        g.dash()
+        run(g, K.DASH_TIME + 0.05)
+        self.assertEqual(g.mp, 2 - K.DASH_COST)
+
     def test_beam_pierces(self):
         g = Game()
         quiet(g)
@@ -303,7 +344,8 @@ class Perks(unittest.TestCase):
         for p in K.PERKS:
             g.offer = [p]
             g.pick(0)
-        self.assertEqual(g.dash_cost, 0)
+        self.assertTrue(g.dash_refund)
+        self.assertEqual(g.dash_cost, K.DASH_COST)   # "Cheap dash" refunds, it is never free
         self.assertEqual(g.reach, K.SWORD_REACH + 2)
         for _ in range(20):
             g.offer = g.roll_perks()
@@ -569,6 +611,16 @@ class BossVariety(unittest.TestCase):
         n = len(g.enemies)
         self.fire_move(g, b, "summon")
         self.assertEqual(len(g.enemies), n)
+
+    def test_summon_mid_loop_does_not_crash_a_walking_enemy(self):
+        # crash seen live: imps summoned during step() had no entry in gaps -> IndexError
+        g, b = self.boss(0)
+        g.spawn("imp")
+        imp = g.enemies[1]
+        imp["x"], imp["state"] = b["x"] + 20, "walk"
+        self.fire_move(g, b, "summon")
+        self.assertEqual([e["kind"] for e in g.enemies].count("imp"), 3)
+        run(g, 1.0)
 
     def test_quake_rains_stalactites_and_one_can_be_dodged(self):
         random.seed(4)
@@ -974,6 +1026,47 @@ class Animation(unittest.TestCase):
             K.main(Scr(keys))
         finally:
             K.time.sleep = real
+
+
+class HeldKeys(unittest.TestCase):
+    """main() with real key-ups (common.KEYS): running survives a stab and a jump."""
+    def play(self, real):
+        import common
+        tr = common.KeyTracker()
+        tr.real = real
+        tr.event(ord("d"), True)             # D held down for the whole run
+        mvs, orig = [], K.Game.step
+        def step(g, mv, blocking, speed=1.0):
+            mvs.append(mv)
+            return orig(g, mv, blocking, speed)
+        class Scr:
+            def __init__(self): self.n = 0
+            def getmaxyx(self): return (14, 80)
+            def getch(self):
+                self.n += 1
+                keys = {3: ord("d"), 9: ord("j"), 15: ord("w"), 21: ord("j")}
+                return keys.get(self.n, ord("q") if self.n > 80 else -1)
+            def __getattr__(self, name): return lambda *a, **k: None
+        now = [K.time.time()]                 # game clock: a frame passes per sleep
+        def sleep(s): now[0] += 1.0 / K.FPS
+        real_sleep, real_time = K.time.sleep, K.time.time
+        K.time.sleep, K.time.time, K.KEYS, K.Game.step = sleep, (lambda: now[0]), tr, step
+        try:
+            K.main(Scr())
+        finally:
+            K.time.sleep, K.time.time, K.Game.step = real_sleep, real_time, orig
+            K.KEYS = common.KEYS
+        return mvs
+
+    def test_real_keys_keep_running_through_stab_and_jump(self):
+        mvs = self.play(True)
+        self.assertGreater(len(mvs), 20)
+        self.assertEqual(set(mvs), {1})
+
+    def test_without_real_keys_the_emulation_still_moves(self):
+        mvs = self.play(False)
+        self.assertIn(1, mvs)                 # the single D press still walks...
+        self.assertEqual(mvs[-1], 0)          # ...but the old guess runs out: the reported bug
 
 
 def Game():
