@@ -3,18 +3,33 @@ protocol (state file, heartbeat, focus), and the game picker.
 
 argv (set by hook.py): <state file> <claude pane: tmux pane id, "wt" or "window">
 """
-import os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-for _d in ("knight", "dino"):
-    if os.path.join(ROOT, _d) not in sys.path:
-        sys.path.insert(0, os.path.join(ROOT, _d))
 
-# name, title, one-line pitch - in menu order
-GAMES = [
-    ("knight", "Knight vs Devils", "sword, shield and spells against waves of devils"),
-    ("dino",   "Dino Run",         "jump the cactuses, as long as you can"),
-]
+
+def find_games(root=ROOT):
+    """Every game in the repo: a folder <name>/ holding <name>.py and game.json
+    ({"title": ..., "pitch": ..., "order": n}). Returns [(name, title, pitch)] in menu order.
+    Adding a game = adding such a folder; nothing else lists the games."""
+    found = []
+    for d in sorted(os.listdir(root)):
+        meta = os.path.join(root, d, "game.json")
+        if not (os.path.isfile(meta) and os.path.isfile(os.path.join(root, d, d + ".py"))):
+            continue
+        try:
+            with open(meta, encoding="utf-8") as f:
+                m = json.load(f)
+            found.append((m.get("order", 99), d, m["title"], m.get("pitch", "")))
+        except Exception:
+            continue  # a broken game.json hides that game, never the others
+    return [(d, t, p) for _, d, t, p in sorted(found)]
+
+
+GAMES = find_games()   # [(name, title, pitch)] - name is the folder and the module
+for _g in GAMES:
+    if os.path.join(ROOT, _g[0]) not in sys.path:
+        sys.path.insert(0, os.path.join(ROOT, _g[0]))
 DATA = os.path.join(os.path.expanduser("~"), ".claude", "waiting-games")
 LAST_GAME = os.path.join(DATA, "last-game")
 
@@ -447,13 +462,118 @@ def is_menu_key(k):
     return k in (ord("m"), ord("M"), 9)
 
 
-def _put(scr, y, x, s, attr=0):
-    h, w = scr.getmaxyx()
-    if 0 <= y < h and 0 <= x < w - 1:
+def put(win, y, x, s, attr=0):
+    """addstr that never raises: clips at every edge, x may be negative or a float."""
+    h, w = win.getmaxyx()
+    x = int(x)
+    if x < 0:
+        s, x = s[-x:], 0
+    if 0 <= y < h and x < w - 1 and s:
         try:
-            scr.addstr(y, x, s[: w - 1 - x], attr)
+            win.addstr(y, x, s[: w - 1 - x], attr)
         except curses.error:
             pass
+
+
+def load_int(path, default=0):
+    """A number kept in a file (high scores). Missing or unreadable -> default."""
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except Exception:
+        return default
+
+
+def save_int(path, n):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(str(n))
+    except Exception:
+        pass
+
+
+class HookSession:
+    """The Claude Code side of a game, the same in every game:
+    the hook's state file, the heartbeat, the PAUSED banners, and the keys every
+    game shares (Q quit, M/Tab game menu, Enter = go to Claude, P = keep playing).
+
+        ses = HookSession("mygame")
+        if ses.quit: return None
+        each frame:  ev = ses.poll()          # "quit" | "pause" | "run" | None
+        each key:    act = ses.key(scr, k)    # see key()
+        drawing:     msg = ses.banner_msg()   # text for the banner, or None
+    """
+
+    def __init__(self, name):
+        self.name = name
+        self.next = None     # the game picked in the menu, after key() returned "switch"
+        self.banner = None   # None | "done" (Claude finished) | "notify" (Claude needs you)
+        self._beat = 0
+        self.seen = read_state()
+        self.quit = bool(self.seen and self.seen[1] == "quit")  # session ended before we started
+        if self.seen and self.seen[1] in ("done", "notify"):
+            self.banner = self.seen[1]
+
+    def poll(self):
+        """Call once per frame. Returns "quit" (session over: return None), "pause"
+        (a banner just went up), "run" (a new prompt: Claude works again, unpause) or None."""
+        now = int(time.time())
+        if now != self._beat:
+            heartbeat()
+            self._beat = now
+        st = read_state()
+        if st == self.seen:
+            return None
+        self.seen = st
+        if st and st[1] == "quit":
+            return "quit"
+        if st and st[1] in ("done", "notify"):
+            self.banner = st[1]
+            return "pause"
+        if st and st[1] == "run":
+            self.banner = None
+            return "run"
+        return None
+
+    def key(self, scr, k):
+        """Handle the shared keys. Returns
+           None      not a shared key: the game handles k
+           "keep"    used up (a banner is showing); nothing else to do
+           "quit"    the game returns None
+           "switch"  the game returns self.next
+           "back"    back from the game menu: repaint (the game may pause)
+           "pause"   Enter on a banner: focus went to Claude, stay paused
+           "play"    P on a banner: keep playing"""
+        if k in (ord("q"), ord("Q")):
+            return "quit"
+        if self.banner:
+            if k in (10, 13, curses.KEY_ENTER):
+                self.banner = None
+                focus_claude()
+                return "pause"
+            if k in (ord("p"), ord("P")):
+                self.banner = None
+                return "play"
+            return "keep"
+        if is_menu_key(k):
+            choice = pick_game(scr, self.name)
+            if choice == "quit":
+                return "quit"
+            if choice and choice != self.name:
+                self.next = choice
+                return "switch"
+            scr.clearok(True)
+            return "back"
+        return None
+
+    def banner_msg(self):
+        if not self.banner:
+            return None
+        go = "  Enter = go to Claude " if can_focus() else "  P = keep playing "
+        if self.banner == "done":
+            return " PAUSED - Claude is waiting for your prompt." + go
+        return " PAUSED - Claude needs you!" + go
 
 
 def pick_game(scr, current):
@@ -503,7 +623,7 @@ def pick_game(scr, current):
                 attr = curses.A_BOLD | curses.A_REVERSE
             elif r.startswith("     "):
                 attr = curses.A_DIM
-            _put(scr, top + i, x, r.ljust(width) if attr & curses.A_REVERSE else r, attr)
+            put(scr, top + i, x, r.ljust(width) if attr & curses.A_REVERSE else r, attr)
         scr.refresh()
         time.sleep(1.0 / 30)
 
@@ -515,7 +635,7 @@ def last_game():
             return name
     except Exception:
         pass
-    return GAMES[0][0]
+    return GAMES[0][0] if GAMES else None
 
 
 def run(first=None):

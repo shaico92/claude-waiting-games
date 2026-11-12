@@ -4,8 +4,7 @@ Space/Up/W = jump, P = pause, M = switch game, Q = quit."""
 import os, random, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import (curses, DATA, CLAUDE_PANE, read_state, heartbeat,  # noqa: E402
-                    focus_claude, can_focus, is_menu_key, pick_game, run)
+from common import curses, DATA, HookSession, put, load_int, save_int, run  # noqa: E402
 
 SCORE_FILE = os.path.join(DATA, "dino-highscore")
 FPS = 30
@@ -13,30 +12,6 @@ DINO_X = 6
 DINO = [" @>", " /\\"]  # top row, bottom row
 
 
-def load_high():
-    try:
-        return int(open(SCORE_FILE).read().strip())
-    except Exception:
-        return 0
-
-
-def save_high(n):
-    try:
-        os.makedirs(DATA, exist_ok=True)
-        open(SCORE_FILE, "w").write(str(n))
-    except Exception:
-        pass
-
-
-def put(win, y, x, s, attr=0):
-    h, w = win.getmaxyx()
-    if 0 <= y < h and x < w - 1:
-        if x < 0:
-            s, x = s[-x:], 0
-        try:
-            win.addstr(y, x, s[: max(0, w - 1 - x)], attr)
-        except curses.error:
-            pass
 
 
 def main(scr):
@@ -45,58 +20,42 @@ def main(scr):
     scr.nodelay(True)
     scr.keypad(True)
     scr.clear()
-    high = load_high()
+    high = load_int(SCORE_FILE)
 
     def reset():
         return dict(y=0.0, vy=0.0, obs=[], gap=30.0, score=0.0, speed=0.55, dead=False)
 
     g = reset()
     paused = False
-    banner = None  # None | "done" | "notify"
-    seen = read_state()
-    if seen and seen[1] == "quit":
+    ses = HookSession("dino")  # Claude's state: banners, Q, M menu, Enter = go to Claude
+    if ses.quit:
         return None
-    if seen and seen[1] in ("done", "notify"):
-        banner = seen[1]
 
     while True:
         t0 = time.time()
-        if int(t0) != int(t0 - 1.0 / FPS):
-            heartbeat()
         h, w = scr.getmaxyx()
         ground = h - 2
 
-        st = read_state()
-        if st != seen:
-            seen = st
-            if st and st[1] == "quit":
-                return None
-            if st and st[1] in ("done", "notify"):
-                banner = st[1]
-            elif st and st[1] == "run":
-                banner, paused = None, False
+        ev = ses.poll()
+        if ev == "quit":
+            return None
+        if ev == "run":
+            paused = False
 
         while True:
             k = scr.getch()
             if k == -1:
                 break
-            if k in (ord("q"), ord("Q")):
+            act = ses.key(scr, k)
+            if act == "quit":
                 return None
-            if is_menu_key(k):
-                choice = pick_game(scr, "dino")
-                if choice == "quit":
-                    return None
-                if choice and choice != "dino":
-                    return choice
-                scr.clear()
+            if act == "switch":
+                return ses.next
+            if act in ("back", "pause"):
                 paused = True
-                continue
-            if banner:
-                if k in (10, 13, curses.KEY_ENTER):
-                    banner, paused = None, True
-                    focus_claude()
-                elif k in (ord("p"), ord("P")):
-                    banner, paused = None, False
+            elif act == "play":
+                paused = False
+            if act:
                 continue
             if k in (ord("p"), ord("P")):
                 paused = not paused
@@ -108,7 +67,7 @@ def main(scr):
                 elif g["y"] == 0:
                     g["vy"] = 0.9
 
-        if not (paused or banner or g["dead"]):
+        if not (paused or ses.banner or g["dead"]):
             g["y"] += g["vy"]
             g["vy"] -= 0.11
             if g["y"] <= 0:
@@ -127,7 +86,7 @@ def main(scr):
                     g["dead"] = True
                     if int(g["score"]) > high:
                         high = int(g["score"])
-                        save_high(high)
+                        save_int(SCORE_FILE, high)
 
         scr.erase()
         put(scr, 0, 1, "score %d   best %d" % (g["score"], max(high, int(g["score"]))))
@@ -138,15 +97,10 @@ def main(scr):
         for x, ow, oh in g["obs"]:
             for r in range(oh):
                 put(scr, ground - r, int(x), "#" * ow)
-        go = "  Enter = go to Claude " if can_focus() else "  P = keep playing "
-        msg = None
-        if banner == "done":
-            msg = " PAUSED - Claude is waiting for your prompt." + go
-        elif banner == "notify":
-            msg = " PAUSED - Claude needs you!" + go
-        elif g["dead"]:
+        msg = ses.banner_msg()
+        if not msg and g["dead"]:
             msg = " GAME OVER - space to retry, M other game, Q quit "
-        elif paused:
+        elif not msg and paused:
             msg = " paused - space to resume "
         if msg:
             put(scr, max(1, h // 2 - 1), max(0, (w - len(msg)) // 2), msg, curses.A_REVERSE)

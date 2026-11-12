@@ -6,13 +6,12 @@ Shield: K or S / Down     Pause: P               Quit: Q
 Weapon: T (sword / spear / hammer)   Combo finisher: X (after a 6-kill combo)
 Powers (cost mana):  Dash: U or E (1)   Sword beam: I or R (2)   Spin: L or G (3)
 """
-import json, os, random, subprocess, sys, time
+import json, os, random, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import (curses, STATE, CLAUDE_PANE, ALIVE, read_state, heartbeat,  # noqa: E402
-                    focus_claude, can_focus, is_menu_key, pick_game, run, key_repeat_timing, KEYS)
+from common import (curses, HookSession, put, load_int, save_int, run,  # noqa: E402
+                    key_repeat_timing, KEYS)
 
-HOME = os.path.dirname(os.path.abspath(__file__))
 # kept outside the plugin folder, which is replaced on every plugin update
 SCORE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "knight-game", "highscore")
 # the run in progress, saved at each wave start; dying deletes it
@@ -20,9 +19,6 @@ RUN_FILE = os.path.join(os.path.expanduser("~"), ".claude", "knight-game", "run.
 RUN_VERSION = 1
 RUN_KEYS = ("score", "best_combo", "hp", "max_hp", "mp", "max_mp", "regen", "reach",
             "dash_refund", "beam_dmg", "spin_range", "perks", "weapon")
-STATE = sys.argv[1] if len(sys.argv) > 1 else None        # file written by the hooks
-CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane id, "wt" or "window"
-ALIVE = STATE + ".alive" if STATE else None               # heartbeat the Windows hook checks
 FPS = 30
 DT = 1.0 / FPS
 KW, KH, MAX_HP = 3, 3, 5
@@ -224,18 +220,11 @@ HELP = [
 
 
 def load_high():
-    try:
-        return int(open(SCORE_FILE).read().strip())
-    except Exception:
-        return 0
+    return load_int(SCORE_FILE)
 
 
 def save_high(n):
-    try:
-        os.makedirs(os.path.dirname(SCORE_FILE), exist_ok=True)
-        open(SCORE_FILE, "w").write(str(n))
-    except Exception:
-        pass
+    save_int(SCORE_FILE, n)
 
 
 def load_run():
@@ -1085,18 +1074,6 @@ class Game:
         self.flames = [fl for fl in self.flames if fl[1] > 0]
 
 
-def put(win, y, x, s, attr=0):
-    h, w = win.getmaxyx()
-    x = int(x)
-    if x < 0:
-        s, x = s[-x:], 0
-    if 0 <= y < h and x < w - 1 and s:
-        try:
-            win.addstr(y, x, s[: w - 1 - x], attr)
-        except curses.error:
-            pass
-
-
 def col_of(n):
     return curses.color_pair(n) if curses.has_colors() else 0
 
@@ -1247,12 +1224,9 @@ def main(scr):
         g.restore(run_save)
     paused = False
     help_page = None         # None, or the page of the H screen being shown
-    banner = None            # None | "done" | "notify"
-    seen = read_state()
-    if seen and seen[1] == "quit":  # the session ended before the game got going
-        return
-    if seen and seen[1] in ("done", "notify"):
-        banner = seen[1]
+    ses = HookSession("knight")   # Claude's state: banners, Q, M menu, Enter = go to Claude
+    if ses.quit:  # the session ended before the game got going
+        return None
     last_key = {}
     move_until = {-1: 0.0, 1: 0.0}
     walk_speed = 1.0         # < 1 until the key repeat confirms the key is held
@@ -1275,10 +1249,8 @@ def main(scr):
 
     while True:
         t0 = time.time()
-        if not (paused or banner or help_page is not None):
+        if not (paused or ses.banner or help_page is not None):
             frame += 1
-        if int(t0) != int(t0 - DT):
-            heartbeat()
         # Windows: the VT screen re-measures the pane in erase(). WT can reflow a
         # pane on its own, so resend everything after a resize and every 5 s.
         if os.name == "nt":
@@ -1296,29 +1268,27 @@ def main(scr):
         if help_page is not None:
             help_page = min(help_page, pages - 1)  # the pane may have been resized
 
-        st = read_state()
-        if st != seen:
-            seen = st
-            if st and st[1] == "quit":
-                return
-            if st and st[1] in ("done", "notify"):
-                banner, help_page = st[1], None
-            elif st and st[1] == "run":
-                banner, paused = None, False
+        ev = ses.poll()
+        if ev == "quit":
+            return None
+        if ev == "pause":
+            help_page = None
+        elif ev == "run":
+            paused = False
 
         while True:
             k = scr.getch()
             if k == -1:
                 break
             now = time.time()
-            if k in (ord("q"), ord("Q")):
-                return
-            if banner:
-                if k in (10, 13, curses.KEY_ENTER):
-                    banner, paused = None, True
-                    focus_claude()
-                elif k in (ord("p"), ord("P")):
-                    banner, paused = None, False
+            act = ses.key(scr, k)
+            if act == "quit":
+                return None
+            if act == "switch":
+                return ses.next
+            if act in ("pause", "play"):
+                paused = act == "pause"
+            if act:
                 continue
             if help_page is not None:  # H / space / Enter: next page; past the last, or Esc: close
                 if k == 27 or (k in (ord("h"), ord("H"), ord("?"), ord(" "), 10, 13)
@@ -1326,14 +1296,6 @@ def main(scr):
                     help_page = None
                 elif k in (ord("h"), ord("H"), ord("?"), ord(" "), 10, 13):
                     help_page += 1
-                continue
-            if is_menu_key(k):
-                choice = pick_game(scr, "knight")
-                if choice == "quit":
-                    return None
-                if choice and choice != "knight":
-                    return choice
-                scr.clearok(True)
                 continue
             if k in (ord("h"), ord("H"), ord("?")):
                 help_page = 0
@@ -1403,7 +1365,7 @@ def main(scr):
             scr.refresh()
             time.sleep(0.1)
             continue
-        if not (paused or banner or help_page is not None):
+        if not (paused or ses.banner or help_page is not None):
             if KEYS.real:
                 mv = 1 if right and (not left or right >= left) else (-1 if left else 0)
                 walk_speed = 1.0
@@ -1533,7 +1495,7 @@ def main(scr):
             bar = name + " [" + "#" * fill + "." * (n - fill) + "]"
             put(scr, 1, max(0, (w - len(bar)) // 2), bar, col(5) | curses.A_BOLD)
 
-        menu = g.offer and not (banner or paused or g.dead)
+        menu = g.offer and not (ses.banner or paused or g.dead)
         if menu:  # perk pick between waves
             y0 = max(1, h // 2 - 2)
             title = " Wave %d clear! Pick a perk: " % g.wave
@@ -1543,11 +1505,8 @@ def main(scr):
                 put(scr, y0 + 1 + i, max(0, (w - len(title)) // 2 + 2), line, col(3) | curses.A_BOLD)
 
         msg = None
-        go = "  Enter = go to Claude " if can_focus() else "  P = keep playing "
-        if banner == "done":
-            msg = " PAUSED - Claude is waiting for your prompt." + go
-        elif banner == "notify":
-            msg = " PAUSED - Claude needs you!" + go
+        if ses.banner:
+            msg = ses.banner_msg()
         elif g.dead:
             if g.death_t > 0.8:
                 msg = " YOU DIED  wave %d  best combo %d " % (g.wave, g.best_combo)
@@ -1566,20 +1525,20 @@ def main(scr):
                 msg = " Wave 1 incoming - H = how to play "
             if g.resumed:
                 msg = " Run resumed - wave %d incoming " % (g.wave + 1)
-        if g.scene_msg_t > 0 and not (banner or paused or g.dead or menu):
+        if g.scene_msg_t > 0 and not (ses.banner or paused or g.dead or menu):
             title = " ~ %s ~ " % SCENES[g.scene]["name"]
             put(scr, max(1, h // 2 - 3), max(0, (w - len(title)) // 2), title, curses.A_REVERSE | curses.A_BOLD)
             hint = " %s " % SCENES[g.scene]["hint"]
             put(scr, max(1, h // 2 - 2), max(0, (w - len(hint)) // 2), hint, col(3) | curses.A_BOLD)
         elif msg:
             put(scr, max(1, h // 2 - 2), max(0, (w - len(msg)) // 2), msg, curses.A_REVERSE)
-        if g.boss_msg_t > 0 and not (banner or paused or g.dead or menu):
+        if g.boss_msg_t > 0 and not (ses.banner or paused or g.dead or menu):
             bb = BOSSES[g.boss_variant]
             title = " !! %s !! " % bb["name"]
             put(scr, max(1, h // 2 - 1), max(0, (w - len(title)) // 2), title, col(bb["col"]) | curses.A_REVERSE | curses.A_BOLD)
             hint = " %s " % bb["hint"]
             put(scr, max(1, h // 2), max(0, (w - len(hint)) // 2), hint, col(3) | curses.A_BOLD)
-        if not (banner or menu or boss) and h >= 10:  # in a short pane row 1 is needed for the jump
+        if not (ses.banner or menu or boss) and h >= 10:  # in a short pane row 1 is needed for the jump
             tip = "A/D move W jump J sword K shield | U dash I beam L spin | H help M games P Q"
             put(scr, 1, max(0, w - len(tip) - 2), tip, curses.A_DIM)
         if help_page is not None:  # the H screen covers everything below the HUD

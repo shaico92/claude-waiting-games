@@ -19,8 +19,16 @@ SETTINGS = os.path.join(CLAUDE, "settings.json")
 MARKS = ("waiting-games/app/hook.py", "knight-game/hook.py", "knight-game/hooks/run.sh",
          "dino-game/hook.py")  # also removes the older knight/dino installs
 EVENTS = {"UserPromptSubmit": "start", "Notification": "notify", "Stop": "stop", "SessionEnd": "end"}
-FILES = ("hook.py", "games.py", "common.py", "winhost.py", "vscodebridge.py", os.path.join("hooks", "run.sh"),
-         os.path.join("knight", "knight.py"), os.path.join("dino", "dino.py"))
+CORE = ("hook.py", "games.py", "common.py", "winhost.py", "vscodebridge.py", os.path.join("hooks", "run.sh"))
+
+
+def game_files(root):
+    """Every game folder's files (a game = a folder with game.json, see common.find_games),
+    tests left out. Returns (folders, files) relative to root."""
+    dirs = [d for d in sorted(os.listdir(root)) if os.path.isfile(os.path.join(root, d, "game.json"))]
+    files = [os.path.join(d, f) for d in dirs for f in sorted(os.listdir(os.path.join(root, d)))
+             if f == "game.json" or (f.endswith(".py") and not f.startswith("test_"))]
+    return dirs, files
 
 
 # Windows Terminal's console/terminal handoff classes (from its AppxManifest). Setting
@@ -107,55 +115,61 @@ def vscode_extension(install):
     return 1 if failed else 0
 
 
-arg = sys.argv[1] if len(sys.argv) > 1 else ""
-os.makedirs(CLAUDE, exist_ok=True)
-if arg in ("terminal", "terminal-undo"):
-    default_terminal(arg == "terminal")
-    sys.exit(0)
-if arg in ("vscode", "vscode-uninstall"):
-    sys.exit(vscode_extension(arg == "vscode"))
-uninstall = arg == "uninstall"
-settings = {}
-if os.path.exists(SETTINGS):
-    with open(SETTINGS) as f:
-        settings = json.load(f)
-    shutil.copy(SETTINGS, SETTINGS + ".knight-backup")
-hooks = settings.setdefault("hooks", {})
+def main(arg):
+    os.makedirs(CLAUDE, exist_ok=True)
+    if arg in ("terminal", "terminal-undo"):
+        default_terminal(arg == "terminal")
+        sys.exit(0)
+    if arg in ("vscode", "vscode-uninstall"):
+        sys.exit(vscode_extension(arg == "vscode"))
+    uninstall = arg == "uninstall"
+    settings = {}
+    if os.path.exists(SETTINGS):
+        with open(SETTINGS) as f:
+            settings = json.load(f)
+        shutil.copy(SETTINGS, SETTINGS + ".knight-backup")
+    hooks = settings.setdefault("hooks", {})
 
-for ev in EVENTS:  # drop any earlier game hooks
-    kept = [g for g in hooks.get(ev, [])
-            if not any(m in h.get("command", "").replace("\\", "/")
-                       for h in g.get("hooks", []) for m in MARKS)]
-    if kept:
-        hooks[ev] = kept
+    for ev in EVENTS:  # drop any earlier game hooks
+        kept = [g for g in hooks.get(ev, [])
+                if not any(m in h.get("command", "").replace("\\", "/")
+                           for h in g.get("hooks", []) for m in MARKS)]
+        if kept:
+            hooks[ev] = kept
+        else:
+            hooks.pop(ev, None)
+
+    if uninstall:  # keep the high score file
+        dirs, files = game_files(DEST) if os.path.isdir(DEST) else ([], [])
+        for name in CORE + tuple(files):
+            try:
+                os.remove(os.path.join(DEST, name))
+            except OSError:
+                pass
+        for d in [os.path.join(DEST, x) for x in ["hooks"] + dirs] + [DEST]:
+            try:
+                os.rmdir(d)  # only if empty: the high score stays
+            except OSError:
+                pass
     else:
-        hooks.pop(ev, None)
+        dirs, files = game_files(SRC)
+        for d in ["hooks"] + dirs:
+            os.makedirs(os.path.join(DEST, d), exist_ok=True)
+        for name in CORE + tuple(files):
+            shutil.copy(os.path.join(SRC, name), os.path.join(DEST, name))
+        root = DEST.replace("\\", "/")  # forward slashes work in sh and PowerShell
+        for ev, arg in EVENTS.items():
+            hooks.setdefault(ev, []).append({"hooks": [{
+                "type": "command", "command": command(root, arg), "timeout": 10}]})
+    if not hooks:
+        settings.pop("hooks", None)
+    with open(SETTINGS, "w") as f:
+        json.dump(settings, f, indent=2)
+    default_terminal(not uninstall)
+    print("Removed." if uninstall else
+          "Installed. Restart Claude Code and send a prompt. (Using the plugin too? Then run "
+          "`install.py uninstall`, or the game opens twice.)")
 
-if uninstall:  # keep the high score file
-    for name in FILES:
-        try:
-            os.remove(os.path.join(DEST, name))
-        except OSError:
-            pass
-    for d in [os.path.join(DEST, x) for x in ("hooks", "knight", "dino")] + [DEST]:
-        try:
-            os.rmdir(d)  # only if empty: the high score stays
-        except OSError:
-            pass
-else:
-    for d in ("hooks", "knight", "dino"):
-        os.makedirs(os.path.join(DEST, d), exist_ok=True)
-    for name in FILES:
-        shutil.copy(os.path.join(SRC, name), os.path.join(DEST, name))
-    root = DEST.replace("\\", "/")  # forward slashes work in sh and PowerShell
-    for ev, arg in EVENTS.items():
-        hooks.setdefault(ev, []).append({"hooks": [{
-            "type": "command", "command": command(root, arg), "timeout": 10}]})
-if not hooks:
-    settings.pop("hooks", None)
-with open(SETTINGS, "w") as f:
-    json.dump(settings, f, indent=2)
-default_terminal(not uninstall)
-print("Removed." if uninstall else
-      "Installed. Restart Claude Code and send a prompt. (Using the plugin too? Then run "
-      "`install.py uninstall`, or the game opens twice.)")
+
+if __name__ == "__main__":  # importing this file (tests) must never install anything
+    main(sys.argv[1] if len(sys.argv) > 1 else "")

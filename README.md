@@ -124,3 +124,62 @@ the default terminal (the old setting is saved and put back on uninstall).
 Remove with `python3 install.py uninstall`.
 
 Try a game without Claude: `python3 games.py` (the menu is on M).
+
+## Adding a game
+A game is a folder. Nothing else lists the games: the menu (M), the plugin and
+`install.py` all find them by looking for `<name>/game.json`.
+
+    mygame/
+      game.json     {"title": "My Game", "pitch": "one line for the menu", "order": 3}
+      mygame.py     main(scr) -> the name of the game to switch to, or None to quit
+
+`common.HookSession` does everything Claude-related (pause banners, Enter = go to
+Claude, P = keep playing, Q, the M menu, the heartbeat), so a game is only its own loop:
+
+```python
+import os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common import curses, DATA, HookSession, put, load_int, save_int, run
+
+SCORE_FILE = os.path.join(DATA, "mygame-highscore")   # kept across plugin updates
+
+def main(scr):
+    curses.curs_set(0); scr.nodelay(True); scr.keypad(True)
+    ses = HookSession("mygame")
+    if ses.quit:
+        return None
+    paused = False
+    while True:
+        ev = ses.poll()                      # "quit" | "pause" | "run" | None
+        if ev == "quit":
+            return None
+        if ev == "run":                      # a new prompt: play on
+            paused = False
+        k = scr.getch()
+        act = ses.key(scr, k) if k != -1 else None
+        if act == "quit":
+            return None
+        if act == "switch":
+            return ses.next
+        if act in ("pause", "back"):
+            paused = True
+        elif act == "play":
+            paused = False
+        elif act is None and k != -1:
+            pass                             # your keys here
+        if not (paused or ses.banner):
+            pass                             # advance your game
+        scr.erase()
+        msg = ses.banner_msg() or (" paused " if paused else None)
+        if msg:
+            put(scr, 2, 2, msg, curses.A_REVERSE)
+        scr.refresh()
+        time.sleep(1 / 30)
+
+if __name__ == "__main__":
+    run("mygame")
+```
+
+Keep anything that must survive a plugin update (scores, saves) under `DATA`
+(`~/.claude/waiting-games`), never inside the game folder. Test it with
+`python3 mygame/mygame.py`; it shows up in the M menu straight away.
