@@ -5,6 +5,9 @@ no access to GitHub). Prefer the plugin - see README.md.
   python3 install.py uninstall     remove
   python3 install.py terminal       Windows only: just make Windows Terminal the default
   python3 install.py terminal-undo  Windows only: put the old default terminal back
+  python3 install.py vscode         add the companion VS Code extension: the game opens as a
+                                    terminal in VS Code's panel, not a separate window
+  python3 install.py vscode-uninstall   remove it
 On Windows, install also makes Windows Terminal the default terminal (cmd, python,
 anything that opens a console opens in Windows Terminal); uninstall undoes it."""
 import json, os, shutil, sys
@@ -16,7 +19,7 @@ SETTINGS = os.path.join(CLAUDE, "settings.json")
 MARKS = ("waiting-games/app/hook.py", "knight-game/hook.py", "knight-game/hooks/run.sh",
          "dino-game/hook.py")  # also removes the older knight/dino installs
 EVENTS = {"UserPromptSubmit": "start", "Notification": "notify", "Stop": "stop", "SessionEnd": "end"}
-FILES = ("hook.py", "games.py", "common.py", "winhost.py", os.path.join("hooks", "run.sh"),
+FILES = ("hook.py", "games.py", "common.py", "winhost.py", "vscodebridge.py", os.path.join("hooks", "run.sh"),
          os.path.join("knight", "knight.py"), os.path.join("dino", "dino.py"))
 
 
@@ -77,11 +80,40 @@ def command(root, arg):
             '$input | & $p "%s/hook.py" %s; if ($LASTEXITCODE -eq 0) { break } } }') % (root, arg, root, arg)
 
 
+def vscode_extension(install):
+    """Install / remove the companion extension in every VS Code-family editor whose
+    command-line tool is on the PATH. Returns the exit code."""
+    sys.path.insert(0, os.path.join(SRC, "vscode"))
+    import build_vsix
+    clis = [(n, shutil.which(n)) for n in ("code", "code-insiders", "cursor", "windsurf", "codium")]
+    clis = [(n, p) for n, p in clis if p]
+    if not clis:
+        print("No VS Code command found on the PATH. In VS Code run 'Shell Command: Install "
+              "'code' command in PATH' (macOS) or reinstall with 'Add to PATH' ticked, then retry.")
+        return 1
+    ext_id, failed = build_vsix.extension_id(), 0
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        vsix = build_vsix.build(os.path.join(tmp, "waiting-games-vscode.vsix")) if install else None
+        for name, path in clis:
+            args = [path, "--install-extension", vsix, "--force"] if install else [path, "--uninstall-extension", ext_id]
+            r = subprocess.run(args, capture_output=True, text=True)
+            ok = r.returncode == 0
+            failed += not ok
+            print("%s: %s%s" % (name, "ok" if ok else "FAILED", "" if ok else " - " + (r.stdout + r.stderr).strip()[:300]))
+    if install and not failed:
+        print("Now run 'Developer: Reload Window' in VS Code (or restart it). The game then opens "
+              "as a terminal in the panel when you send a prompt.")
+    return 1 if failed else 0
+
+
 arg = sys.argv[1] if len(sys.argv) > 1 else ""
 os.makedirs(CLAUDE, exist_ok=True)
 if arg in ("terminal", "terminal-undo"):
     default_terminal(arg == "terminal")
     sys.exit(0)
+if arg in ("vscode", "vscode-uninstall"):
+    sys.exit(vscode_extension(arg == "vscode"))
 uninstall = arg == "uninstall"
 settings = {}
 if os.path.exists(SETTINGS):

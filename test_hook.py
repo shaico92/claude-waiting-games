@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Which way does hook.py open the game, for each place Claude Code can run?  python3 test_hook.py"""
-import os, pathlib, sys, tempfile, unittest
+import json, os, pathlib, sys, tempfile, time, unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _argv, sys.argv = sys.argv, sys.argv[:1]   # common.py reads the game's arguments from argv
-import common, hook, winhost
+import common, hook, vscodebridge, winhost
 sys.argv = _argv
 
 NOISE = ("CLAUDE_CODE_ENTRYPOINT", "TERM_PROGRAM", "WT_SESSION", "TMUX", "TMUX_PANE",
@@ -92,6 +92,132 @@ class Diagnostics(unittest.TestCase):
     def test_ancestors_sees_this_process(self):
         chain = hook.ancestors()
         self.assertTrue(chain and "python" in chain[0].lower(), chain)
+
+
+class VSCodePanel(unittest.TestCase):
+    """The game as a terminal in VS Code's panel, via the companion extension."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        p = mock.patch.object(vscodebridge, "SPOOL", self.dir.name)
+        p.start()
+        self.addCleanup(p.stop)
+        self.state = os.path.join(self.dir.name, "x.state")
+
+    def presence(self, pid, workspaces=(), age=0):
+        path = os.path.join(self.dir.name, "ext-%d.json" % pid)
+        with open(path, "w") as f:
+            json.dump({"pid": pid, "workspaces": list(workspaces), "ts": 0}, f)
+        if age:
+            t = time.time() - age
+            os.utime(path, (t, t))
+
+    def requests(self):
+        out = []
+        for name in sorted(os.listdir(self.dir.name)):
+            if name.startswith("req-"):
+                with open(os.path.join(self.dir.name, name)) as f:
+                    out.append(json.load(f))
+        return out
+
+    # ---- finding the right window
+    def test_exact_match_by_ancestor_pid(self):
+        self.presence(4242, ["C:\\other"])
+        self.presence(5555, ["C:\\proj"])
+        self.assertEqual(vscodebridge.find_extension("C:\\proj", chain=[1, 4242, 7]), 4242)
+
+    def test_falls_back_to_the_one_window_holding_the_cwd(self):
+        self.presence(5555, ["C:\\proj"])
+        self.presence(6666, ["C:\\elsewhere"])
+        self.assertEqual(vscodebridge.find_extension("C:\\proj\\sub\\dir", chain=[1]), 5555)
+        if os.name == "nt":  # Windows paths are case-insensitive
+            self.assertEqual(vscodebridge.find_extension("c:\\PROJ", chain=[1]), 5555)
+
+    def test_ambiguous_or_unknown_is_none(self):
+        self.presence(5555, ["C:\\proj"])
+        self.presence(6666, ["C:\\proj"])      # two windows on the same folder
+        self.assertIsNone(vscodebridge.find_extension("C:\\proj", chain=[1]))
+        self.assertIsNone(vscodebridge.find_extension("D:\\nowhere", chain=[1]))
+        self.assertIsNone(vscodebridge.find_extension(None, chain=[1]))
+
+    def test_stale_presence_is_ignored(self):
+        self.presence(4242, ["C:\\proj"], age=60)   # a window that was closed
+        self.assertIsNone(vscodebridge.find_extension("C:\\proj", chain=[4242]))
+
+    def test_no_spool_folder_is_fine(self):
+        with mock.patch.object(vscodebridge, "SPOOL", os.path.join(self.dir.name, "missing")):
+            self.assertIsNone(vscodebridge.find_extension("C:\\proj", chain=[1]))
+
+    # ---- routing
+    def route(self, env, data=None):
+        keep = {k: v for k, v in os.environ.items() if k not in NOISE}
+        keep.update(env)
+        with mock.patch.dict(os.environ, keep, clear=True), \
+                mock.patch.object(hook, "wt_exe", lambda: "wt"), \
+                mock.patch.object(hook, "wt_is_default", lambda: True), \
+                mock.patch.object(hook.shutil, "which", lambda n: None):
+            return hook.choose_mode(data)
+
+    def test_vscode_uses_the_panel_when_the_extension_is_running(self):
+        self.presence(5555, ["C:\\proj"])
+        data = {"cwd": "C:\\proj"}
+        self.assertEqual(self.route({"CLAUDE_CODE_ENTRYPOINT": "claude-vscode"}, data), "vscode")
+        self.assertEqual(self.route({"CLAUDE_CODE_ENTRYPOINT": "cli", "TERM_PROGRAM": "vscode"}, data), "vscode")
+
+    def test_vscode_without_the_extension_keeps_the_separate_window(self):
+        self.assertEqual(self.route({"CLAUDE_CODE_ENTRYPOINT": "claude-vscode"}, {"cwd": "C:\\proj"}), "window")
+
+    def test_other_hosts_never_use_the_panel(self):
+        self.presence(5555, ["C:\\proj"])
+        data = {"cwd": "C:\\proj"}
+        self.assertEqual(self.route({"CLAUDE_CODE_ENTRYPOINT": "claude-desktop"}, data), "window")
+        self.assertEqual(self.route({"CLAUDE_CODE_ENTRYPOINT": "cli", "WT_SESSION": "x"}, data), "wt")
+
+    # ---- what the hook sends
+    def run_start(self, data, alive, ext_alive=True):
+        with mock.patch.object(hook.tempfile, "gettempdir", lambda: self.dir.name), \
+                mock.patch.object(hook, "open_window") as win:
+            if alive:
+                path = os.path.join(self.dir.name, "claude-knight-vscode-%s.state" % data["session_id"])
+                open(path + ".alive", "w").close()
+            hook.run_heartbeat("start", data, "vscode")
+        return win
+
+    def test_start_asks_the_extension_to_open_the_game(self):
+        self.presence(5555, ["C:\\proj"])
+        win = self.run_start({"session_id": "s1", "cwd": "C:\\proj"}, alive=False)
+        (req,) = self.requests()
+        self.assertEqual(req["type"], "open")
+        self.assertEqual(req["cmd"][1:], [hook.GAME, req["state"], "vscode"])
+        self.assertTrue(req["state"].endswith("claude-knight-vscode-s1.state"))
+        win.assert_not_called()
+
+    def test_start_while_the_game_runs_just_shows_it(self):
+        self.presence(5555, ["C:\\proj"])
+        self.run_start({"session_id": "s2", "cwd": "C:\\proj"}, alive=True)
+        self.assertEqual([r["type"] for r in self.requests()], ["show"])
+
+    def test_extension_gone_falls_back_to_a_window(self):
+        win = self.run_start({"session_id": "s3", "cwd": "C:\\proj"}, alive=False)
+        self.assertEqual(self.requests(), [])
+        win.assert_called_once()
+
+    # ---- the game's side: Enter goes back to the chat
+    def test_enter_in_the_game_focuses_the_claude_chat(self):
+        with mock.patch.object(common, "CLAUDE_PANE", "vscode"), \
+                mock.patch.dict(os.environ, {"WAITING_GAMES_EXT": "5555"}):
+            self.assertTrue(common.can_focus())
+            common.focus_claude()
+        (req,) = self.requests()
+        self.assertEqual(req["type"], "focus-claude")
+        self.assertIn("req-5555-", [n for n in os.listdir(self.dir.name) if n.startswith("req-")][0])
+
+    def test_focus_without_the_env_var_does_nothing(self):
+        env = {k: v for k, v in os.environ.items() if k != "WAITING_GAMES_EXT"}
+        with mock.patch.object(common, "CLAUDE_PANE", "vscode"), mock.patch.dict(os.environ, env, clear=True):
+            common.focus_claude()
+        self.assertEqual(self.requests(), [])
 
 
 @unittest.skipUnless(os.name == "nt", "window focus is Windows only")

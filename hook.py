@@ -9,8 +9,10 @@ usage: hook.py start|notify|stop|end   - never prints, never fails the hook
 Where the game opens, first match wins:
   tmux              a pane below Claude (macOS, Linux, WSL)
   Windows Terminal  a split pane below Claude (Windows, or WSL inside Windows Terminal)
-  window            its own terminal window - the VS Code extension, VS Code's terminal,
-                    and any other terminal (Windows console, WSL, Linux desktop, macOS)"""
+  vscode            a terminal in VS Code's panel, made by the companion extension in vscode/
+                    (the VS Code extension, or `claude` in VS Code's terminal)
+  window            its own terminal window - the desktop app, VS Code without the companion
+                    extension, and any other terminal (Windows console, Linux desktop, macOS)"""
 import json, os, platform, shutil, subprocess, sys, tempfile, time
 
 HOME = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +21,10 @@ try:  # Windows: find the Claude window, bring it back. Optional: the game works
     import winhost
 except Exception:
     winhost = None
+try:  # the companion VS Code extension (vscode/): game as a terminal in VS Code's panel
+    import vscodebridge
+except Exception:
+    vscodebridge = None
 GAME = os.path.join(HOME, "games.py")
 TITLE = "Waiting games"
 IS_WSL = sys.platform.startswith("linux") and (
@@ -156,6 +162,13 @@ def run_heartbeat(action, data, mode):
         else:
             spawn([wt, "-w", "0", "split-pane", "-H", "-s", "0.4", "--title", TITLE]
                   + game_cmd(state, "wt"))
+    elif mode == "vscode":  # a terminal in VS Code's panel, made by the companion extension
+        ext = vscode_extension(data)
+        sent = ext and vscodebridge.send(ext, {
+            "type": "show" if alive else "open", "state": state, "name": TITLE, "cwd": HOME,
+            "cmd": [sys.executable, GAME, state, "vscode"]})
+        if not sent and not alive:  # the extension went away since choose_mode()
+            open_window(state)
     elif not alive:
         open_window(state)
 
@@ -203,18 +216,22 @@ def main():
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}")
     except Exception:
         pass
-    mode = choose_mode()
+    mode = choose_mode(data)
     log(action, data, mode)
+    if mode == "window" and host() in ("vscode", "vscode-terminal"):
+        _append("         no live Waiting Games VS Code extension for this window: "
+                "separate window (install it with: python3 install.py vscode)")
     if mode == "tmux":
         run_tmux(action, os.environ["TMUX_PANE"])
     else:
         run_heartbeat(action, data, mode)
 
 
-def choose_mode():
-    """tmux | wt | window, from where Claude Code runs. The Windows Terminal split needs
-    a terminal to split: a hook from the desktop app or the VS Code extension must never
-    split whichever Windows Terminal window happens to be the most recent one."""
+def choose_mode(data=None):
+    """tmux | wt | vscode | window, from where Claude Code runs. The Windows Terminal split
+    needs a terminal to split: a hook from the desktop app or the VS Code extension must
+    never split whichever Windows Terminal window happens to be the most recent one.
+    In VS Code the game goes into the panel if the companion extension is running."""
     kind, e = host(), os.environ
     if kind in ("terminal", "vscode-terminal") and e.get("TMUX") and e.get("TMUX_PANE") \
             and shutil.which("tmux"):
@@ -225,7 +242,14 @@ def choose_mode():
         # plain CLI, whose entrypoint is exactly "cli".
         if e.get("WT_SESSION") or (entrypoint() == "cli" and wt_is_default()):
             return "wt"
+    if kind in ("vscode", "vscode-terminal") and vscode_extension(data):
+        return "vscode"
     return "window"
+
+
+def vscode_extension(data):
+    """pid of the live companion extension for this Claude, or None."""
+    return vscodebridge.find_extension((data or {}).get("cwd")) if vscodebridge else None
 
 
 # ------------------------------------------------------------------ diagnostics

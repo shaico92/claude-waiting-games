@@ -1,0 +1,21 @@
+{
+  "name": "waiting-games-vscode",
+  "displayName": "Waiting Games for Claude Code",
+  "description": "Opens the waiting-games plugin's game as a terminal in VS Code's panel while Claude Code works, instead of a separate window.",
+  "version": "1.0.0",
+  "publisher": "shaico92",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shaico92/claude-waiting-games"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js"
+}

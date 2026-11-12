@@ -190,6 +190,13 @@ def can_focus():
 
 
 def focus_claude():
+    if CLAUDE_PANE == "vscode":  # a terminal in VS Code's panel: the extension focuses the chat
+        try:
+            import vscodebridge
+            vscodebridge.send(int(os.environ["WAITING_GAMES_EXT"]), {"type": "focus-claude"})
+        except (KeyError, ValueError, ImportError):
+            pass
+        return
     if CLAUDE_PANE == "window":  # its own window: bring the Claude window back
         hwnd = _host_window()
         if hwnd:
