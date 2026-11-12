@@ -326,6 +326,655 @@ class Death(unittest.TestCase):
         run(g, 0.3)
         self.assertEqual(K.knight_rows(g, False)[0][-1], "_o_")    # fallen
 
+class Powerups(unittest.TestCase):
+    def test_each_wave_drops_one_powerup_two_on_boss_waves(self):
+        for wave, want in ((1, 1), (4, 1), (5, 2)):
+            random.seed(wave)
+            g = Game()
+            g.wave = wave - 1
+            g.next_wave()
+            g.x = 40.0   # away from both spawn edges, so nothing is picked up
+            for _ in range(len(g.queue)):   # kill the whole wave as it spawns
+                g.spawn(g.queue.pop())
+                g.enemies[-1]["hp"] = 0
+                g.step(0, False)
+            self.assertEqual(len(g.powerups) + (g.power_drops != 0) * 99, want, (wave, g.powerups))
+
+    def test_pickup_applies_and_expires(self):
+        g = Game()
+        quiet(g)
+        g.powerups.append([g.x + 1, 12.0, "rage"])
+        g.step(0, False)
+        self.assertFalse(g.powerups)
+        self.assertGreater(g.rage_t, 7.5)
+        run(g, 8.5)
+        self.assertEqual(g.rage_t, 0.0)
+
+    def test_untouched_powerup_times_out(self):
+        g = Game()
+        quiet(g)
+        g.powerups.append([2.0, 1.0, "haste"])
+        g.x = 60.0
+        run(g, 1.2)
+        self.assertFalse(g.powerups)
+        self.assertEqual(g.haste_t, 0.0)
+
+    def test_shield_absorbs_exactly_one_hit(self):
+        g = Game()
+        g.take_power("aura")
+        self.assertFalse(g.hurt(1, 1))
+        self.assertEqual((g.hp, g.aura), (g.max_hp, 0))
+        run(g, 1.0)                                  # let the invulnerability lapse
+        self.assertTrue(g.hurt(1, 1))
+        self.assertEqual(g.hp, g.max_hp - 1)
+
+    def test_rage_doubles_sword_damage_and_speeds_swings(self):
+        g = Game()
+        quiet(g)
+        e = place(g, "devil", 1)                     # 2 hp: one raged swing kills it
+        g.take_power("rage")
+        g.swing()
+        self.assertLessEqual(e["hp"], 0)
+        self.assertLess(g.atk_cd, 0.25)
+
+    def test_haste_runs_farther(self):
+        a, b = Game(), Game()
+        b.take_power("haste")
+        run(a, 1.0, mv=1)
+        run(b, 1.0, mv=1)
+        self.assertGreater(b.x, a.x + 3)
+
+    def test_mana_refills_and_aura_is_not_offered_twice(self):
+        g = Game()
+        g.mp = 0
+        g.take_power("mana")
+        self.assertEqual(g.mp, g.max_mp)
+        g.aura = 1
+        g.mp = 0
+        for _ in range(50):
+            self.assertNotEqual(g.pick_power(), "aura")
+        g.mp = g.max_mp
+        for _ in range(50):
+            self.assertNotEqual(g.pick_power(), "mana")
+
+
+class Scenes(unittest.TestCase):
+    def go_to_scene(self, si):
+        g = Game()
+        quiet(g)
+        g.scene = si
+        g.hazards, g.haz_t = [], 1e9    # only the hazards a test adds
+        return g
+
+    def test_scene_changes_every_three_waves(self):
+        self.assertEqual([K.scene_of(w) for w in range(1, 14)], [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 0])
+
+    def test_new_scene_starts_a_wipe_and_banner(self):
+        g = Game()
+        g.wave = 3
+        g.next_wave()                      # wave 4: cave
+        self.assertEqual((g.scene, g.prev_scene), (1, 0))
+        self.assertGreater(g.scene_t, 0)
+        self.assertGreater(g.scene_msg_t, 0)
+        run(g, K.SCENE_MSG_T + 0.1)
+        self.assertEqual((g.scene_t, g.scene_msg_t), (0.0, 0.0))
+
+    def test_same_scene_does_not_wipe(self):
+        g = Game()
+        g.next_wave()
+        g.next_wave()
+        self.assertEqual(g.scene_t, 0.0)
+
+    def test_scene_biases_the_pool(self):
+        random.seed(1)
+        kinds = set()
+        for _ in range(60):
+            g = Game()
+            g.wave = 6                      # next wave is 7: frost, which adds guards
+            g.next_wave()
+            kinds |= set(g.queue)
+        self.assertEqual(g.scene, 2)
+        self.assertIn("guard", kinds)
+
+    def test_stalactite_hurts_knight_under_it_and_enemies_too(self):
+        g = self.go_to_scene(1)
+        g.hazards.append([g.x + 1, 0.1, "drip"])
+        e = place(g, "devil", 6)
+        g.hazards.append([e["x"] + 1, 0.1, "drip"])
+        run(g, 0.2)
+        self.assertEqual(g.hp, g.max_hp - 1)
+        self.assertLessEqual(e["hp"], 0)
+
+    def test_stalactite_warning_does_nothing_until_it_lands(self):
+        g = self.go_to_scene(1)
+        g.hazards.append([g.x + 1, 1.0, "drip"])
+        run(g, 0.5)
+        self.assertEqual(g.hp, g.max_hp)
+
+    def test_geyser_can_be_jumped(self):
+        g = self.go_to_scene(3)
+        g.hazards.append([g.x + 1, 0.1, "geyser"])
+        g.vy = K.JUMP_V                    # in the air when it erupts
+        run(g, 0.12)
+        self.assertEqual(g.hp, g.max_hp)
+        g = self.go_to_scene(3)
+        g.hazards.append([g.x + 1, 0.1, "geyser"])
+        run(g, 0.2)
+        self.assertEqual(g.hp, g.max_hp - 1)
+
+    def test_shield_soaks_a_hazard(self):
+        g = self.go_to_scene(3)
+        g.take_power("aura")
+        g.hazards.append([g.x + 1, 0.1, "geyser"])
+        run(g, 0.2)
+        self.assertEqual((g.hp, g.aura), (g.max_hp, 0))
+
+    def test_hazards_only_spawn_while_fighting(self):
+        g = self.go_to_scene(1)
+        g.haz_t = 0.0
+        run(g, 1.0)
+        self.assertFalse(g.hazards)        # nothing to fight: quiet
+        place(g, "imp", 30)
+        g.haz_t = 0.0
+        run(g, 0.1)
+        self.assertTrue(g.hazards)
+
+    def test_ice_slides_farther_than_grass(self):
+        a, b = self.go_to_scene(0), self.go_to_scene(2)
+        for g in (a, b):
+            run(g, 0.5, mv=1)
+            run(g, 1.0)
+        self.assertGreater(b.x - 40, 0)
+        self.assertGreater(b.x, a.x + 2)
+
+    def test_boons_follow_the_scene(self):
+        random.seed(3)
+        g = self.go_to_scene(2)
+        picks = [g.pick_power() for _ in range(400)]
+        self.assertGreater(picks.count("haste"), picks.count("rage"))
+
+    def test_every_scene_draws(self):
+        """Run main() on each scene, mid-wipe, with hazards on screen."""
+        class Scr:
+            def __init__(self): self.n = 0
+            def getmaxyx(self): return (14, 80)
+            def getch(self):
+                self.n += 1
+                return ord("q") if self.n > 60 else -1
+            def __getattr__(self, name): return lambda *a, **k: None
+        orig = K.Game.__init__
+        real = K.time.sleep
+        K.time.sleep = lambda s: None
+        try:
+            for si in range(len(K.SCENES)):
+                def init(self, w, si=si):
+                    orig(self, w)
+                    self.scene, self.prev_scene = si, (si + 1) % len(K.SCENES)
+                    self.scene_t, self.scene_msg_t = 1.0, 3.0
+                    self.hazards = [[20.0, 1.0, "drip"], [40.0, 0.2, "geyser"], [60.0, -0.1, "drip"], [30.0, -0.1, "geyser"]]
+                K.Game.__init__ = init
+                K.main(Scr())
+        finally:
+            K.Game.__init__ = orig
+            K.time.sleep = real
+
+
+class BossVariety(unittest.TestCase):
+    def boss(self, scene, gap=10):
+        g = Game()
+        quiet(g)
+        g.wave = K.BOSS_EVERY      # boss hp scales with the wave
+        g.scene = scene
+        g.hazards, g.haz_t = [], 1e9
+        g.spawn("boss")
+        b = g.enemies[0]
+        b["x"] = g.x + K.KW + gap
+        return g, b
+
+    def fire_move(self, g, b, move):
+        b["move"], b["state"], b["t"] = move, "windup", K.DT / 2
+        g.step(0, False)
+
+    def test_each_scene_has_its_own_boss(self):
+        names = set()
+        for si in range(len(K.SCENES)):
+            g, b = self.boss(si)
+            self.assertEqual(b["variant"], si)
+            self.assertEqual(b["hp"], K.BOSSES[si]["hp"])
+            names.add(K.BOSSES[si]["name"])
+            self.assertEqual(g.boss_variant, si)
+            self.assertGreater(g.boss_msg_t, 0)
+        self.assertEqual(len(names), len(K.SCENES))
+
+    def test_signature_move_is_in_the_rotation(self):
+        random.seed(5)
+        for si in range(len(K.SCENES)):
+            g, b = self.boss(si, gap=4)
+            seen = set()
+            for _ in range(200):
+                b["ai_cd"] = 0
+                b["state"] = "walk"
+                if g.boss_move(b, 4):
+                    seen.add(b["move"])
+            self.assertIn(K.BOSSES[si]["move"], seen, si)
+            self.assertIn("slam", seen)
+
+    def test_summon_calls_imps_and_respects_the_cap(self):
+        g, b = self.boss(0)
+        self.fire_move(g, b, "summon")
+        self.assertEqual([e["kind"] for e in g.enemies].count("imp"), 2)
+        g, b = self.boss(0)
+        for _ in range(K.SUMMON_CAP):
+            g.spawn("imp")
+        n = len(g.enemies)
+        self.fire_move(g, b, "summon")
+        self.assertEqual(len(g.enemies), n)
+
+    def test_quake_rains_stalactites_and_one_can_be_dodged(self):
+        random.seed(4)
+        g, b = self.boss(1)
+        g.x = 40.0
+        self.fire_move(g, b, "quake")
+        self.assertEqual(len([h for h in g.hazards if h[2] == "drip"]), 3)
+        run(g, 0.2)
+        self.assertEqual(g.hp, g.max_hp)       # still only warnings
+        g.x = 5.0                              # step out of the way before they land
+        run(g, 1.5)
+        self.assertEqual(g.hp, g.max_hp)
+
+    def test_erupt_marches_geysers_toward_the_knight(self):
+        g, b = self.boss(3, gap=20)
+        self.fire_move(g, b, "erupt")
+        gey = sorted((h for h in g.hazards if h[2] == "geyser"), key=lambda h: h[1])
+        self.assertEqual(len(gey), 4)
+        xs = [h[0] for h in gey]
+        self.assertEqual(xs, sorted(xs, reverse=True))   # the first one is nearest the boss
+        self.assertGreater(gey[-1][1], gey[0][1])
+
+    def test_slide_goes_to_the_wall_and_leaves_the_boss_stunned(self):
+        g, b = self.boss(2, gap=20)
+        g.x = 5.0
+        b["x"] = 30.0
+        self.fire_move(g, b, "slide")
+        self.assertEqual(b["state"], "charge")
+        for _ in range(int(3.0 / K.DT)):
+            g.step(0, False)
+            if b["state"] != "charge":
+                break
+        self.assertEqual(b["state"], "stun")
+        self.assertGreater(b["t"], 2.0)
+        self.assertLessEqual(b["x"], 0.5)      # it ran all the way to the wall, past the knight
+
+    def test_boss_sprites_differ(self):
+        sprites = set()
+        for si in range(len(K.SCENES)):
+            g, b = self.boss(si)
+            sprites.add(tuple(K.enemy_rows(g, b, 0)))
+        self.assertEqual(len(sprites), len(K.SCENES))
+
+    def test_every_boss_draws(self):
+        class Scr:
+            def __init__(self): self.n = 0
+            def getmaxyx(self): return (14, 80)
+            def getch(self):
+                self.n += 1
+                return ord("q") if self.n > 50 else -1
+            def __getattr__(self, name): return lambda *a, **k: None
+        orig, real = K.Game.__init__, K.time.sleep
+        K.time.sleep = lambda s: None
+        try:
+            for si in range(len(K.SCENES)):
+                def init(self, w, si=si):
+                    orig(self, w)
+                    self.scene = self.prev_scene = si
+                    self.wave, self.cleared, self.inter = 5, True, 1e9
+                    self.spawn("boss")
+                    self.enemies[0]["x"] = 50.0
+                K.Game.__init__ = init
+                K.main(Scr())
+        finally:
+            K.Game.__init__, K.time.sleep = orig, real
+
+
+class Elites(unittest.TestCase):
+    def test_elite_wave_and_reward(self):
+        random.seed(8)
+        g = Game()
+        g.wave = 2
+        g.next_wave()                          # wave 3
+        self.assertIn("elite", g.queue)
+        g.wave = 3
+        g.next_wave()                          # wave 4
+        self.assertNotIn("elite", g.queue)
+        g.wave = 7
+        g.next_wave()                          # wave 8
+        self.assertIn("elite", g.queue)
+        g = Game()
+        quiet(g)
+        g.power_drops = 0
+        g.spawn("elite")
+        e = g.enemies[0]
+        self.assertEqual((e["kind"], e["hp"]), ("brute", 10))
+        self.assertEqual(K.enemy_col(e), 3)
+        e["x"] = 60.0
+        e["hp"] = 0
+        g.step(0, False)
+        self.assertEqual(len(g.powerups), 1)   # an elite always drops one
+        self.assertEqual(g.score, 80 * 3)
+
+
+class SceneEnemies(unittest.TestCase):
+    def test_spider_drops_then_walks(self):
+        g = Game()
+        quiet(g)
+        g.h = 14
+        g.spawn("spider")
+        e = g.enemies[0]
+        self.assertEqual(e["state"], "drop")
+        self.assertGreater(e["alt"], 3)
+        e["x"] = 60.0
+        run(g, 1.0)
+        self.assertEqual((e["state"], e["alt"]), ("walk", 0))
+        e["state"] = "drop"
+        e["alt"] = 6.0
+        g.swing()                              # a ground swing cannot reach it in the air
+        self.assertEqual(e["hp"], 2)
+
+    def test_spider_landing_on_the_knight_hurts(self):
+        g = Game()
+        quiet(g)
+        g.spawn("spider")
+        e = g.enemies[0]
+        e["x"], e["alt"] = g.x, 0.1
+        run(g, 0.1)
+        self.assertEqual(g.hp, g.max_hp - 1)
+
+    def test_roller_crosses_the_screen_and_can_be_jumped(self):
+        g = Game()
+        quiet(g)
+        g.spawn("roller")
+        e = g.enemies[0]
+        e["x"], e["vx"] = g.x - 10, 15.0
+        g.y, g.vy = 2.0, 0.0                   # in the air as it passes under
+        for _ in range(int(1.2 / K.DT)):
+            g.vy, g.y = 0.0, 2.0
+            g.step(0, False)
+        self.assertEqual(g.hp, g.max_hp)
+        run(g, 3.0)
+        self.assertFalse(g.enemies)            # rolled off: gone, no score
+        self.assertEqual(g.score, 0)
+
+    def test_roller_hurts_on_the_ground_and_a_shield_smashes_it(self):
+        g = Game()
+        quiet(g)
+        g.spawn("roller")
+        e = g.enemies[0]
+        e["x"], e["vx"] = g.x - 4, 15.0
+        run(g, 0.6)
+        self.assertEqual(g.hp, g.max_hp - 1)
+        g = Game()
+        quiet(g)
+        g.face = -1
+        g.spawn("roller")
+        e = g.enemies[0]
+        e["x"], e["vx"] = g.x - 4, 15.0
+        g.mp = 0
+        for _ in range(int(0.6 / K.DT)):
+            g.step(0, True)
+        self.assertEqual(g.hp, g.max_hp)
+        self.assertEqual(g.mp, 1)
+
+    def test_fire_imp_leaves_flames_that_burn(self):
+        g = Game()
+        quiet(g)
+        g.x = 70.0
+        g.spawn("fimp")
+        e = g.enemies[0]
+        e["x"] = 5.0
+        run(g, 1.0)
+        self.assertTrue(g.flames)
+        fl = g.flames[0]
+        g.enemies = []
+        g.x, g.invuln = fl[0] - 1, 0.0
+        g.step(0, False)
+        self.assertEqual(g.hp, g.max_hp - 1)
+        run(g, K.FLAME_TTL + 0.5)
+        self.assertFalse(g.flames)
+
+    def test_scene_pools_include_their_enemy(self):
+        random.seed(2)
+        for wave, kind in ((3, "spider"), (6, "roller"), (9, "fimp")):
+            seen = set()
+            for _ in range(40):
+                g = Game()
+                g.wave = wave
+                g.next_wave()
+                seen |= set(g.queue)
+            self.assertIn(kind, seen)
+
+
+class Finisher(unittest.TestCase):
+    def kill(self, g, n):
+        for _ in range(n):
+            e = place(g, "imp", 40)
+            e["hp"] = 0
+            g.step(0, False)
+
+    def test_six_kill_combo_earns_it_and_it_clears_the_screen(self):
+        g = Game()
+        quiet(g)
+        self.kill(g, 5)
+        self.assertFalse(g.fin_ready)
+        self.kill(g, 1)
+        self.assertTrue(g.fin_ready)
+        a = place(g, "devil", 6)
+        b = place(g, "brute", 12, -1)
+        g.finisher()
+        self.assertFalse(g.fin_ready)
+        self.assertEqual(a["hp"], 0 - 1)       # 3 damage into 2 hp
+        self.assertEqual(b["hp"], 5 - 3)       # reaches both sides
+        self.assertGreater(g.fin_t, 0)
+        self.assertFalse(g.finisher())         # one per earn
+
+    def test_it_is_earned_again_after_six_more(self):
+        g = Game()
+        quiet(g)
+        self.kill(g, 6)
+        g.finisher()
+        self.kill(g, 5)
+        self.assertFalse(g.fin_ready)
+        self.kill(g, 1)
+        self.assertTrue(g.fin_ready)
+
+    def test_getting_hit_or_waiting_loses_it(self):
+        g = Game()
+        quiet(g)
+        self.kill(g, 6)
+        g.hurt(1, 1)
+        self.assertFalse(g.fin_ready)
+        self.assertFalse(g.finisher())
+        g = Game()
+        quiet(g)
+        self.kill(g, 6)
+        run(g, K.COMBO_TIME + 0.5)
+        self.assertFalse(g.fin_ready)
+
+    def test_finisher_beats_a_guard_shield(self):
+        g = Game()
+        quiet(g)
+        self.kill(g, 6)
+        e = place(g, "guard", 5)
+        g.finisher()
+        self.assertLessEqual(e["hp"], 0)
+
+
+class Weapons(unittest.TestCase):
+    def test_t_cycles_through_the_three(self):
+        g = Game()
+        seen = [g.weapon]
+        for _ in range(3):
+            g.swap_weapon()
+            g.atk_cd = 0
+            seen.append(g.weapon)
+        self.assertEqual(seen, ["sword", "spear", "hammer", "sword"])
+
+    def test_spear_reaches_farther_and_swings_slower(self):
+        g = Game()
+        quiet(g)
+        far = place(g, "imp", 6)               # beyond the sword's reach of 4
+        g.swing()
+        self.assertEqual(far["hp"], 1)
+        g.atk_cd = 0
+        g.weapon = "spear"
+        g.swing()
+        self.assertLessEqual(far["hp"], 0)
+        self.assertGreater(g.atk_cd, 0.4)
+
+    def test_hammer_is_short_but_hits_for_two_and_breaks_guards(self):
+        g = Game()
+        quiet(g)
+        g.weapon = "hammer"
+        e = place(g, "guard", 2)
+        g.swing()
+        self.assertLessEqual(e["hp"], 0)       # shield no use: 2 damage, 2 hp
+        g = Game()
+        quiet(g)
+        g.weapon = "hammer"
+        far = place(g, "imp", 5)
+        g.swing()
+        self.assertEqual(far["hp"], 1)         # out of reach
+        self.assertAlmostEqual(g.atk_cd, 0.7)
+
+    def test_hammer_staggers_a_brute_a_sword_does_not(self):
+        g = Game()
+        quiet(g)
+        b = place(g, "brute", 1)
+        g.swing()
+        self.assertNotEqual(b["state"], "stun")
+        g = Game()
+        quiet(g)
+        g.weapon = "hammer"
+        b = place(g, "brute", 1)
+        g.swing()
+        self.assertEqual(b["state"], "stun")
+        g = Game()
+        quiet(g)
+        g.weapon = "hammer"
+        boss = place(g, "boss", 1)
+        g.swing()
+        self.assertNotEqual(boss["state"], "stun")   # bosses stay unstaggerable
+
+    def test_blade_drawn_per_weapon(self):
+        g = Game()
+        for wpn, tip in (("sword", ">"), ("spear", "}"), ("hammer", "#")):
+            g.weapon, g.atk_t = wpn, K.SWING_T
+            row = K.knight_rows(g, False)[0][1]
+            self.assertTrue(row.endswith(tip), (wpn, row))
+        g.face = -1
+        g.weapon = "spear"
+        self.assertIn("{", K.knight_rows(g, False)[0][1])
+
+    def test_new_things_draw(self):
+        class Scr:
+            def __init__(self): self.n = 0
+            def getmaxyx(self): return (14, 80)
+            def getch(self):
+                self.n += 1
+                return {3: ord("t"), 6: ord("x"), 9: ord("t")}.get(self.n, ord("q") if self.n > 60 else -1)
+            def __getattr__(self, name): return lambda *a, **k: None
+        orig, real = K.Game.__init__, K.time.sleep
+        K.time.sleep = lambda s: None
+        try:
+            def init(self, w):
+                orig(self, w)
+                self.wave, self.cleared, self.inter = 5, True, 1e9
+                self.fin_ready = True
+                self.flames = [[30.0, 2.0]]
+                self.spawn("spider"); self.spawn("roller"); self.spawn("fimp"); self.spawn("elite")
+            K.Game.__init__ = init
+            K.main(Scr())
+        finally:
+            K.Game.__init__, K.time.sleep = orig, real
+
+
+class Animation(unittest.TestCase):
+    def legs(self, g):
+        return K.knight_rows(g, False)[0][-1]
+
+    def test_run_cycle_follows_distance(self):
+        g = Game()
+        seen = set()
+        for _ in range(60):
+            g.step(1, False)
+            seen.add(self.legs(g))
+        self.assertTrue({"/ \\", " | ", r"\ /"} <= seen, seen)
+        run(g, 1.5)   # glides to a stop: back to standing
+        self.assertEqual(self.legs(g), "/ \\")
+
+    def test_jump_poses_and_landing(self):
+        g = Game()
+        g.vy = K.JUMP_V
+        g.step(0, False)
+        self.assertEqual(K.knight_rows(g, False)[0][0], r"\O/")        # rising: arms up
+        while g.vy > -8:
+            g.step(0, False)
+        self.assertEqual(K.knight_rows(g, False)[0][-1], "| |")         # falling: legs tucked
+        while g.y > 0:
+            g.step(0, False)
+        self.assertGreater(g.land_t, 0)                                  # landing crouch
+        self.assertEqual(len(K.knight_rows(g, False)[0]), 2)
+        run(g, 0.2)
+        self.assertEqual(len(K.knight_rows(g, False)[0]), 3)
+
+    def test_sword_draws_back(self):
+        g = Game()
+        g.swing()
+        full = len(K.knight_rows(g, False)[0][1])
+        run(g, 0.12)
+        self.assertLess(len(K.knight_rows(g, False)[0][1]), full)
+
+    def test_dash_leaves_afterimages_that_fade(self):
+        g = Game()
+        g.dash()
+        run(g, 0.15)
+        self.assertTrue(g.ghosts)
+        run(g, 0.5)
+        self.assertFalse(g.ghosts)
+
+    def test_half_speed_walk_is_slower(self):
+        a, b = Game(), Game()
+        for _ in range(15):
+            a.step(1, False, 0.55)
+            b.step(1, False)
+        self.assertLess(a.x, b.x)
+
+    def test_enemy_legs_swap_while_walking(self):
+        g = Game()
+        g.spawn("devil")
+        e = g.enemies[0]
+        rows = set()
+        for x in (10.0, 11.3):
+            e["x"] = x
+            rows.add(K.enemy_rows(g, e, 0)[-1])
+        self.assertEqual(rows, {"/ \\", "| |"})
+
+    def test_whole_screen_draws(self):
+        """Run main() against a scripted fake screen: nothing in the draw code may raise."""
+        class Scr:
+            def __init__(self, keys): self.keys, self.n = keys, 0
+            def getmaxyx(self): return (14, 80)
+            def getch(self):
+                self.n += 1
+                return self.keys.get(self.n, ord("q") if self.n > 120 else -1)
+            def __getattr__(self, name): return lambda *a, **k: None
+        keys = {2: ord("d"), 3: ord("d"), 10: ord("w"), 20: ord("j"), 40: ord("u"), 60: ord("a"), 90: ord("i")}
+        real = K.time.sleep
+        K.time.sleep = lambda s: None
+        try:
+            K.main(Scr(keys))
+        finally:
+            K.time.sleep = real
+
 
 def Game():
     return K.Game(W)

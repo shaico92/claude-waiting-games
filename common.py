@@ -154,6 +154,27 @@ CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane id, "wt" o
 ALIVE = STATE + ".alive" if STATE else None               # heartbeat the hook checks
 
 
+def key_repeat_timing():
+    """(delay before the OS starts repeating a held key, gap between repeats), seconds.
+
+    Terminals send no key-up, so games emulate "held" from the repeats. On Windows
+    the delay is 0.25-1.0 s and the rate 2.5-30/s, both user settings; elsewhere
+    there is no portable way to ask, so a typical value is used.
+    """
+    delay, interval = 0.5, 0.04
+    if os.name == "nt":
+        try:
+            import ctypes
+            v = ctypes.c_uint32()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0016, 0, ctypes.byref(v), 0):  # GETKEYBOARDDELAY
+                delay = (v.value + 1) * 0.25
+            if ctypes.windll.user32.SystemParametersInfoW(0x000A, 0, ctypes.byref(v), 0):  # GETKEYBOARDSPEED
+                interval = 1.0 / (2.5 + v.value * 27.5 / 31)
+        except Exception:
+            pass
+    return delay, interval
+
+
 def read_state():
     """Returns (mtime, text) of the hook state file, or None."""
     if not STATE:
