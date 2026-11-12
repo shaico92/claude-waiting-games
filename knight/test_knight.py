@@ -7,6 +7,8 @@ _argv, sys.argv = sys.argv, sys.argv[:1]  # knight.py reads its hook args from a
 import knight as K
 sys.argv = _argv
 K.SCORE_FILE = os.devnull  # never touch the player's real high score
+import tempfile
+K.RUN_FILE = os.path.join(tempfile.mkdtemp(prefix="knight-test-"), "run.json")  # nor the real save
 
 W = 80
 
@@ -1076,6 +1078,70 @@ def Game():
 def pick_any(g):
     if getattr(g, "offer", None):
         g.pick(0)
+
+
+class RunSave(unittest.TestCase):
+    def setUp(self):
+        K.clear_run()
+
+    def test_new_wave_is_saved(self):
+        g = Game()
+        g.inter = 0.0
+        run(g, 0.1)
+        self.assertEqual(g.wave, 1)
+        d = K.load_run()
+        self.assertEqual(d["wave"], 1)
+        self.assertEqual(d["hp"], g.hp)
+
+    def test_perk_pick_saves_the_next_wave(self):
+        g = Game()
+        g.wave, g.score, g.weapon = 4, 321, "spear"
+        g.offer = ["hp", "reach", "mana"]
+        g.pick(1)
+        d = K.load_run()
+        self.assertEqual(d["wave"], 5)
+        self.assertEqual(d["perks"], ["reach"])
+        self.assertEqual((d["score"], d["weapon"]), (321, "spear"))
+
+    def test_round_trip(self):
+        g = Game()
+        g.wave, g.score, g.best_combo, g.weapon = 6, 900, 7, "hammer"
+        g.offer = ["hp", "mana", "reach"]
+        g.pick(0)
+        g.hp = 3
+        K.save_run(g.snapshot(7))
+        h = Game()
+        self.assertTrue(h.restore(K.load_run()))
+        self.assertEqual((h.max_hp, h.hp, h.score, h.best_combo, h.weapon, h.perks),
+                         (g.max_hp, 3, 900, 7, "hammer", ["hp"]))
+        self.assertTrue(h.resumed)
+        h.inter = 0.0
+        run(h, 0.1)
+        self.assertEqual(h.wave, 7)           # straight into the saved wave
+        self.assertEqual(h.scene, K.scene_of(7))
+        self.assertEqual(h.scene_t, 0)        # no curtain wipe on resume
+        self.assertFalse(h.resumed)
+
+    def test_death_deletes_the_save(self):
+        g = Game()
+        g.inter = 0.0
+        run(g, 0.1)
+        self.assertIsNotNone(K.load_run())
+        g.invuln, g.hp = 0, 1
+        g.hurt(1, 1)
+        self.assertTrue(g.dead)
+        self.assertIsNone(K.load_run())
+
+    def test_bad_saves_are_ignored(self):
+        for text in ("{not json", '{"version": 999, "wave": 3}', '{"version": 1, "wave": 2}'):
+            with open(K.RUN_FILE, "w") as f:
+                f.write(text)
+            self.assertIsNone(K.load_run(), text)
+        g = Game()
+        d = g.snapshot(3)
+        d["hp"] = "lots"
+        self.assertFalse(g.restore(d))         # unusable values: a fresh run, no crash
+        self.assertEqual((g.wave, g.hp, g.resumed), (0, K.MAX_HP, False))
 
 
 if __name__ == "__main__":

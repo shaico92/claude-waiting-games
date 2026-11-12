@@ -37,6 +37,11 @@ pace. A jump pressed just before landing still counts.
 - Claude finishes: the game pauses. Enter jumps back to Claude; your fight is kept
   and resumes on your next prompt. (P keeps playing anyway.)
 - Claude asks for permission: the game pauses with a banner; Enter jumps to Claude.
+- Your run is saved at the start of every wave (and after each perk pick) in
+  `~/.claude/knight-game/run.json`. If the game closes - Q, the window shut, the
+  session ended, the PC restarted - the next game picks up at that wave with your
+  HP, mana, perks, weapon and score. Closing mid-wave replays that wave. Dying
+  deletes the save: the next game starts at wave 1.
 
 ## Enemies
 - Imps: fast, one hit.

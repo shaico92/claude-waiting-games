@@ -6,7 +6,7 @@ Shield: K or S / Down     Pause: P               Quit: Q
 Weapon: T (sword / spear / hammer)   Combo finisher: X (after a 6-kill combo)
 Powers (cost mana):  Dash: U or E (1)   Sword beam: I or R (2)   Spin: L or G (3)
 """
-import os, random, subprocess, sys, time
+import json, os, random, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import (curses, STATE, CLAUDE_PANE, ALIVE, read_state, heartbeat,  # noqa: E402
@@ -15,6 +15,11 @@ from common import (curses, STATE, CLAUDE_PANE, ALIVE, read_state, heartbeat,  #
 HOME = os.path.dirname(os.path.abspath(__file__))
 # kept outside the plugin folder, which is replaced on every plugin update
 SCORE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "knight-game", "highscore")
+# the run in progress, saved at each wave start; dying deletes it
+RUN_FILE = os.path.join(os.path.expanduser("~"), ".claude", "knight-game", "run.json")
+RUN_VERSION = 1
+RUN_KEYS = ("score", "best_combo", "hp", "max_hp", "mp", "max_mp", "regen", "reach",
+            "dash_refund", "beam_dmg", "spin_range", "perks", "weapon")
 STATE = sys.argv[1] if len(sys.argv) > 1 else None        # file written by the hooks
 CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane id, "wt" or "window"
 ALIVE = STATE + ".alive" if STATE else None               # heartbeat the Windows hook checks
@@ -191,6 +196,7 @@ HELP = [
     ("COMBO  kills <2.5s apart: x2-x4", 3, False),
     ("PERKS  1/2/3 after each wave", 3, False),
     ("M or Tab   switch to another game", 0, False),
+    ("SAVED  each wave; dying starts over", 3, False),
     ("POWERUPS  kills drop them: walk in", 0, True),
     ("(S) shield  absorbs one hit", 4, False),
     ("(R) rage    2x damage, fast swings", 1, False),
@@ -228,6 +234,36 @@ def save_high(n):
     try:
         os.makedirs(os.path.dirname(SCORE_FILE), exist_ok=True)
         open(SCORE_FILE, "w").write(str(n))
+    except Exception:
+        pass
+
+
+def load_run():
+    """The saved run as a dict, or None (no save, unreadable, or from another version)."""
+    try:
+        with open(RUN_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("version") == RUN_VERSION and int(d["wave"]) >= 1 and all(k in d for k in RUN_KEYS):
+            return d
+    except Exception:
+        pass
+    return None
+
+
+def save_run(d):
+    try:
+        os.makedirs(os.path.dirname(RUN_FILE), exist_ok=True)
+        tmp = RUN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, RUN_FILE)   # never leave a half-written save behind
+    except Exception:
+        pass
+
+
+def clear_run():
+    try:
+        os.remove(RUN_FILE)
     except Exception:
         pass
 
@@ -285,6 +321,38 @@ class Game:
         self.weapon = "sword"
         self.flames = []      # fire imp trail: [x, ttl]
         self.fin_ready, self.fin_next, self.fin_t = False, FINISHER_COMBO, 0.0
+        self.resumed = False  # this run came back from the save file
+
+    # ---------- the saved run
+    def snapshot(self, wave):
+        """What lasts between waves; `wave` is the wave to play next."""
+        d = {k: getattr(self, k) for k in RUN_KEYS}
+        d["perks"] = list(self.perks)
+        d.update(version=RUN_VERSION, wave=wave)
+        return d
+
+    def restore(self, d):
+        """Back to the start of wave d["wave"], with the saved stats. Bad values fall back to defaults."""
+        try:
+            self.max_hp, self.max_mp = max(1, int(d["max_hp"])), max(1, int(d["max_mp"]))
+            self.hp = min(max(1, int(d["hp"])), self.max_hp)
+            self.mp = min(max(0, int(d["mp"])), self.max_mp)
+            self.regen, self.reach = float(d["regen"]), int(d["reach"])
+            self.dash_refund, self.beam_dmg = bool(d["dash_refund"]), int(d["beam_dmg"])
+            self.spin_range = int(d["spin_range"])
+            self.score, self.best_combo = int(d["score"]), int(d["best_combo"])
+            self.perks = [p for p in d["perks"] if p in PERKS]
+            self.weapon = d["weapon"] if d["weapon"] in WEAPONS else "sword"
+            wave = max(1, int(d["wave"]))
+        except Exception:
+            self.__init__(self.w)
+            return False
+        # step() calls next_wave() after the usual pause; same scene, so no curtain wipe
+        self.wave = wave - 1
+        self.scene = self.prev_scene = scene_of(wave)
+        self.cleared, self.offer, self.inter = True, None, 2.4
+        self.resumed = True
+        return True
 
     # ---------- helpers
     def gap(self, e):
@@ -327,6 +395,7 @@ class Game:
             self.shake = max(self.shake, 0.3)
         if self.hp <= 0:
             self.hp, self.dead = 0, True
+            clear_run()   # dying ends the run: the next game starts at wave 1
             self.burst(self.x + 1, 8, 3, "*+x")
         return True
 
@@ -603,6 +672,7 @@ class Game:
             self.spin_range += 2
         self.perks.append(p)
         self.offer = None
+        save_run(self.snapshot(self.wave + 1))   # keep the perk; the cleared wave isn't replayed
         self.popup(self.x + 1.5, 4, PERKS[p][0], 1.0)
 
     # ---------- enemy behaviour
@@ -846,6 +916,8 @@ class Game:
                 if self.inter <= 0:
                     self.next_wave()
                     self.inter = 2.5
+                    self.resumed = False
+                    save_run(self.snapshot(self.wave))
         elif self.queue:
             self.spawn_t -= DT
             if self.spawn_t <= 0 and len(self.enemies) < min(2 + self.wave // 2, 6):
@@ -1170,6 +1242,9 @@ def main(scr):
     high = load_high()
     h, w = scr.getmaxyx()
     g = Game(w)
+    run_save = load_run()
+    if run_save:
+        g.restore(run_save)
     paused = False
     help_page = None         # None, or the page of the H screen being shown
     banner = None            # None | "done" | "notify"
@@ -1489,6 +1564,8 @@ def main(scr):
                                             g.wave + 1)
             if g.wave == 0:
                 msg = " Wave 1 incoming - H = how to play "
+            if g.resumed:
+                msg = " Run resumed - wave %d incoming " % (g.wave + 1)
         if g.scene_msg_t > 0 and not (banner or paused or g.dead or menu):
             title = " ~ %s ~ " % SCENES[g.scene]["name"]
             put(scr, max(1, h // 2 - 3), max(0, (w - len(title)) // 2), title, curses.A_REVERSE | curses.A_BOLD)
