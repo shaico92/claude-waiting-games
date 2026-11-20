@@ -8,29 +8,60 @@ import json, os, re, subprocess, sys, time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-def find_games(root=ROOT):
-    """Every game in the repo: a folder <name>/ holding <name>.py and game.json
-    ({"title": ..., "pitch": ..., "order": n}). Returns [(name, title, pitch)] in menu order.
-    Adding a game = adding such a folder; nothing else lists the games."""
+DATA = os.path.join(os.path.expanduser("~"), ".claude", "waiting-games")
+PACKS = os.path.join(DATA, "packs")  # extra games: packs/<pack>/<game>/ - outside the plugin, so updates keep them
+
+
+def _scan(root):
+    """[(order, name, title, pitch, folder)] for every <name>/<name>.py + game.json in root."""
     found = []
-    for d in sorted(os.listdir(root)):
-        meta = os.path.join(root, d, "game.json")
-        if not (os.path.isfile(meta) and os.path.isfile(os.path.join(root, d, d + ".py"))):
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return found
+    for d in names:
+        folder = os.path.join(root, d)
+        meta = os.path.join(folder, "game.json")
+        if not (os.path.isfile(meta) and os.path.isfile(os.path.join(folder, d + ".py"))):
             continue
         try:
             with open(meta, encoding="utf-8") as f:
                 m = json.load(f)
-            found.append((m.get("order", 99), d, m["title"], m.get("pitch", "")))
+            found.append((m.get("order", 99), d, m["title"], m.get("pitch", ""), folder))
         except Exception:
             continue  # a broken game.json hides that game, never the others
-    return [(d, t, p) for _, d, t, p in sorted(found)]
+    return found
 
 
-GAMES = find_games()   # [(name, title, pitch)] - name is the folder and the module
+def find_games(root=ROOT, packs=None, folders=None):
+    """Every game: a folder <name>/ holding <name>.py and game.json
+    ({"title": ..., "pitch": ..., "order": n}), in root and in each packs/<pack>/.
+    Returns [(name, title, pitch)] in menu order; the built-in game wins a name clash.
+    folders, if given, is filled with {name: folder}.
+    Adding a game = adding such a folder; nothing else lists the games."""
+    found = _scan(root)
+    if packs:
+        try:
+            pack_dirs = sorted(os.listdir(packs))
+        except OSError:
+            pack_dirs = []
+        for p in pack_dirs:
+            found += _scan(os.path.join(packs, p))
+    seen, out = set(), []
+    for o, d, t, pitch, folder in found:  # built-ins were scanned first
+        if d not in seen:
+            seen.add(d)
+            out.append((o, d, t, pitch, folder))
+    if folders is not None:
+        folders.update({d: f for _, d, _, _, f in out})
+    return [(d, t, p) for _, d, t, p, _ in sorted(out, key=lambda g: (g[0], g[1]))]
+
+
+GAME_DIRS = {}
+GAMES = find_games(ROOT, PACKS, GAME_DIRS)   # [(name, title, pitch)] - name is the folder and the module
 for _g in GAMES:
-    if os.path.join(ROOT, _g[0]) not in sys.path:
-        sys.path.insert(0, os.path.join(ROOT, _g[0]))
-DATA = os.path.join(os.path.expanduser("~"), ".claude", "waiting-games")
+    if GAME_DIRS[_g[0]] not in sys.path:
+        sys.path.insert(0, GAME_DIRS[_g[0]])
 LAST_GAME = os.path.join(DATA, "last-game")
 
 class _VTCurses:
@@ -376,6 +407,26 @@ def _tty_write(s):
 STATE = sys.argv[1] if len(sys.argv) > 1 else None        # file written by the hooks
 CLAUDE_PANE = sys.argv[2] if len(sys.argv) > 2 else None  # tmux pane id, "wt" or "window"
 ALIVE = STATE + ".alive" if STATE else None               # heartbeat the hook checks
+import tempfile  # noqa: E402
+LIVE = os.path.join(tempfile.gettempdir(), "claude-waiting-games.alive")  # one game per PC: any game beats here
+MUTED = os.path.join(DATA, "muted")   # "1" = silenced: the hook opens no game until /games on
+
+
+def set_muted(on):
+    try:
+        os.makedirs(DATA, exist_ok=True)
+        with open(MUTED, "w") as f:
+            f.write("1" if on else "0")
+    except Exception:
+        pass
+
+
+def is_muted():
+    try:
+        with open(MUTED) as f:
+            return f.read().strip() == "1"
+    except Exception:
+        return False
 
 
 def key_repeat_timing():
@@ -409,12 +460,22 @@ def read_state():
         return None
 
 
+OPENING = os.path.join(tempfile.gettempdir(), "claude-waiting-games.opening")  # hook.take_opening_lock
+
+
 def heartbeat():
-    if ALIVE:
+    if STATE:
         try:
-            open(ALIVE, "w").close()
-        except Exception:
+            os.remove(OPENING)  # we are up: the next start may open a game again
+        except OSError:
             pass
+    for path in (ALIVE, LIVE if STATE else None):
+        if path:
+            try:
+                with open(path, "w") as f:
+                    f.write(STATE if path == LIVE else "")
+            except Exception:
+                pass
 
 
 def _host_window():
@@ -558,6 +619,9 @@ class HookSession:
             return "keep"
         if is_menu_key(k):
             choice = pick_game(scr, self.name)
+            if choice == "silence":
+                set_muted(True)
+                return "quit"
             if choice == "quit":
                 return "quit"
             if choice and choice != self.name:
@@ -596,6 +660,8 @@ def pick_game(scr, current):
                 return None
             if k in (ord("q"), ord("Q")):
                 return "quit"
+            if k in (ord("x"), ord("X")):
+                return "silence"
             if k in (curses.KEY_UP, ord("w"), ord("W"), ord("k"), ord("K")):
                 sel = (sel - 1) % len(GAMES)
             elif k in (curses.KEY_DOWN, ord("s"), ord("S"), ord("j"), ord("J")):
@@ -613,7 +679,8 @@ def pick_game(scr, current):
             now_playing = "  (playing)" if name == current else ""
             rows.append("%s %d. %s%s" % (mark, i + 1, title, now_playing))
             rows.append("     " + pitch)
-        rows += ["", "Up/Down + Enter, or 1-%d    Esc/M: back    Q: quit" % len(GAMES)]
+        rows += ["", "Up/Down + Enter, or 1-%d    Esc/M: back    Q: quit" % len(GAMES),
+                 "X: silence the games until you type /games on"]
         top = max(0, (h - len(rows)) // 2)
         width = max(len(r) for r in rows)
         x = max(0, (w - width) // 2)
@@ -672,8 +739,17 @@ def run(first=None):
     except KeyboardInterrupt:
         pass
     finally:
-        if ALIVE:
-            try:
-                os.remove(ALIVE)
-            except Exception:
-                pass
+        for path in (ALIVE, LIVE if STATE else None):
+            if path and (path != LIVE or _live_is_ours()):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+
+def _live_is_ours():
+    try:
+        with open(LIVE) as f:
+            return f.read() == STATE
+    except Exception:
+        return False

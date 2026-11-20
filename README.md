@@ -63,6 +63,16 @@ Windows Terminal) for a split pane.
 and restart the app or the extension (or run `/reload-plugins`). Plugins are per user, so
 both pick up the games; the game opens in its own window (see below).
 
+## One game, and a mute
+- **One game per computer.** With several Claude Code sessions open, the game opens once
+  and follows the session you last sent a prompt in. Only that session pauses or closes it.
+- **`/games off`** closes the game and keeps it closed until you type **`/games on`**
+  (`/games` alone switches). In the game, **M** then **X** does the same.
+- Under the prompt, beside the mode label, a line shows `games on · /games off` or
+  `games silenced · /games on`. The `/games` command and that line need a Claude Code
+  version that runs plugin hooks modules; on older versions the games still work and
+  silence from the M menu, and deleting `~/.claude/waiting-games/muted` brings them back.
+
 ## Where it opens
 | You run Claude Code in | The game opens |
 |---|---|
@@ -124,6 +134,14 @@ the default terminal (the old setting is saved and put back on uninstall).
 Remove with `python3 install.py uninstall`.
 
 Try a game without Claude: `python3 games.py` (the menu is on M).
+
+## More games
+Want more to play while Claude works? The **Waiting Games Pack** adds new games to
+the same M menu. It installs next to the plugin, in `~/.claude/waiting-games/packs/`,
+so plugin updates never remove it. (Link to the itch.io page: coming soon.)
+
+Any folder `~/.claude/waiting-games/packs/<pack>/<game>/` that looks like a game
+(see below) shows up in the menu. A built-in game wins if two share a name.
 
 ## Adding a game
 A game is a folder. Nothing else lists the games: the menu (M), the plugin and

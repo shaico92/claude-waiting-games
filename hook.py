@@ -106,9 +106,13 @@ def tmux(*a):
     return subprocess.run(["tmux", *a], capture_output=True, text=True)
 
 
+def tmux_state(pane):
+    return os.path.join(tempfile.gettempdir(), "claude-knight-" + pane.lstrip("%") + ".state")
+
+
 def run_tmux(action, pane):
-    base = os.path.join(tempfile.gettempdir(), "claude-knight-" + pane.lstrip("%"))
-    state, panefile = base + ".state", base + ".pane"
+    state = tmux_state(pane)
+    panefile = state[:-len(".state")] + ".pane"
     game = None
     try:
         game = open(panefile).read().strip()
@@ -136,8 +140,12 @@ def session_key(data):
     return (data.get("session_id") or os.environ.get("WT_SESSION") or "default").replace(os.sep, "_")
 
 
+def heartbeat_state(data, mode):
+    return os.path.join(tempfile.gettempdir(), "claude-knight-%s-%s.state" % (mode, session_key(data)))
+
+
 def run_heartbeat(action, data, mode):
-    state = os.path.join(tempfile.gettempdir(), "claude-knight-%s-%s.state" % (mode, session_key(data)))
+    state = heartbeat_state(data, mode)
     try:
         alive = time.time() - os.stat(state + ".alive").st_mtime < 3
     except Exception:
@@ -255,6 +263,8 @@ def main():
         pass
     mode = choose_mode(data)
     log(action, data, mode)
+    if not one_game_per_pc(action, data, mode):
+        return
     if mode == "window" and host() in ("vscode", "vscode-terminal"):
         _append("         no live Waiting Games VS Code extension for this window: "
                 "separate window (install it with: python3 install.py vscode)")
@@ -262,6 +272,133 @@ def main():
         run_tmux(action, os.environ["TMUX_PANE"])
     else:
         run_heartbeat(action, data, mode)
+
+
+# ------------------------------------------------------- one game on the whole PC
+# Every running game touches LIVE (common.LIVE) each second, writing its state file's
+# path into it. CURRENT says which state file that is and which Claude session the
+# game follows now: the last one you sent a prompt in.
+def _tmp(name):
+    return os.path.join(tempfile.gettempdir(), name)
+
+
+LIVE_NAME, CURRENT_NAME, OPENING_NAME = (
+    "claude-waiting-games.alive", "claude-waiting-games.current", "claude-waiting-games.opening")
+MUTED = os.path.join(os.path.expanduser("~"), ".claude", "waiting-games", "muted")
+
+
+def is_muted():
+    try:
+        with open(MUTED) as f:
+            return f.read().strip() == "1"
+    except Exception:
+        return False
+
+
+def _fresh(path, secs):
+    try:
+        return time.time() - os.stat(path).st_mtime < secs
+    except OSError:
+        return False
+
+
+def running_game():
+    """The state file of the game open anywhere on this PC, or None."""
+    live = _tmp(LIVE_NAME)
+    if not _fresh(live, 3):
+        return None
+    try:
+        with open(live) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def read_current():
+    try:
+        with open(_tmp(CURRENT_NAME)) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def write_current(state, owner, mode):
+    try:
+        with open(_tmp(CURRENT_NAME), "w") as f:
+            json.dump({"state": state, "owner": owner, "mode": mode}, f)
+    except OSError:
+        pass
+
+
+def take_opening_lock(secs=10):
+    """True for exactly one hook while a game is being opened: two hooks firing for
+    the same prompt (the plugin plus an old install.py copy) must not open two."""
+    path = _tmp(OPENING_NAME)
+    for _ in range(2):
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return True
+        except FileExistsError:
+            if _fresh(path, secs):
+                return False
+            try:
+                os.remove(path)  # stale: the last opening died
+            except OSError:
+                return False
+        except OSError:
+            return True  # no temp folder to lock in: behave as before
+    return False
+
+
+def own_state(data, mode):
+    return tmux_state(os.environ["TMUX_PANE"]) if mode == "tmux" else heartbeat_state(data, mode)
+
+
+def one_game_per_pc(action, data, mode):
+    """Runs before the usual open/pause logic. Returns False when this hook is done.
+      start + silenced          close any open game, open nothing
+      start + a game elsewhere  that game follows this session now (no second game)
+      start + no game           this hook opens one, if it wins the opening lock
+      stop/notify/end           only from the session the game follows"""
+    sid = data.get("session_id") or session_key(data)
+    mine = own_state(data, mode)
+    other = running_game()
+    cur = read_current()
+    if action == "start":
+        if is_muted():
+            if other:
+                _write(other, "quit")
+            return False
+        if other and other != mine:
+            _write(other, "run")
+            write_current(other, sid, cur.get("mode", ""))
+            if cur.get("mode") == "window":
+                try:
+                    save_host_window(other)  # Enter in the game comes back to this window
+                except Exception:
+                    pass
+                focus_later(other)
+            _append("         game already open (%s): it follows this session now" % os.path.basename(other))
+            return False
+        if not other and not _fresh(mine + ".alive", 3) and not take_opening_lock():
+            _append("         another hook is opening the game: skipped")
+            return False
+        write_current(mine, sid, mode)
+        return True
+    if other and cur.get("state") == other and cur.get("owner") not in (None, sid):
+        return False  # the game follows another session: its stop/notify/end only
+    if other and other != mine:
+        _write(other, {"stop": "done", "notify": "notify", "end": "quit"}.get(action, "run"))
+        return False
+    return True
+
+
+def _write(state, text):
+    try:
+        with open(state, "w") as f:
+            f.write(text)
+    except OSError:
+        pass
 
 
 def choose_mode(data=None):
