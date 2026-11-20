@@ -19,7 +19,25 @@ def game(root, name, meta):
 
 class Registry(unittest.TestCase):
     def test_repo_games(self):
-        self.assertEqual([g[0] for g in common.GAMES], ["knight", "dino"])
+        self.assertEqual([g[0] for g in common.find_games()], ["knight", "dino"])
+        self.assertEqual([g[0] for g in common.GAMES][:2], ["knight", "dino"])  # + any installed packs
+
+    def test_packs_add_games_and_builtins_win(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as packs:
+            game(root, "dino", {"title": "Dino", "order": 2})
+            os.makedirs(os.path.join(packs, "pack1"))
+            game(os.path.join(packs, "pack1"), "dino", {"title": "Fake Dino", "order": 1})
+            game(os.path.join(packs, "pack1"), "orb", {"title": "Orb", "order": 3})
+            open(os.path.join(packs, "stray.txt"), "w").write("not a pack")
+            dirs = {}
+            self.assertEqual(common.find_games(root, packs, dirs), [("dino", "Dino", ""), ("orb", "Orb", "")])
+            self.assertEqual(dirs["orb"], os.path.join(packs, "pack1", "orb"))
+            self.assertEqual(dirs["dino"], os.path.join(root, "dino"))
+
+    def test_missing_packs_folder(self):
+        with tempfile.TemporaryDirectory() as root:
+            game(root, "dino", {"title": "Dino"})
+            self.assertEqual(common.find_games(root, os.path.join(root, "nope")), [("dino", "Dino", "")])
 
     def test_discovery_order_and_bad_folders(self):
         with tempfile.TemporaryDirectory() as root:

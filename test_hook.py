@@ -264,5 +264,96 @@ class GoBackToClaude(unittest.TestCase):
                 self.assertTrue(common.can_focus())        # a WT pane can always move focus up
 
 
+class OneGamePerPC(unittest.TestCase):
+    """Two Claude sessions, or two hooks for one prompt, never open two games."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        for p in (mock.patch.object(hook.tempfile, "gettempdir", lambda: self.dir.name),
+                  mock.patch.object(hook, "MUTED", os.path.join(self.dir.name, "muted")),
+                  mock.patch.object(hook, "LOG", os.path.join(self.dir.name, "h.log")),
+                  mock.patch.object(hook, "focus_later", lambda s: None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def path(self, name):
+        return os.path.join(self.dir.name, name)
+
+    def game_running(self, state):
+        """A game is open on this PC, beating for `state`."""
+        with open(self.path(hook.LIVE_NAME), "w") as f:
+            f.write(state)
+        open(state + ".alive", "w").close()
+
+    def read(self, path):
+        with open(path) as f:
+            return f.read()
+
+    def test_first_start_opens_and_records_the_owner(self):
+        self.assertTrue(hook.one_game_per_pc("start", {"session_id": "A"}, "wt"))
+        cur = hook.read_current()
+        self.assertEqual(cur["owner"], "A")
+        self.assertEqual(cur["state"], hook.heartbeat_state({"session_id": "A"}, "wt"))
+
+    def test_a_second_hook_for_the_same_prompt_is_skipped(self):
+        self.assertTrue(hook.one_game_per_pc("start", {"session_id": "A"}, "wt"))
+        self.assertFalse(hook.one_game_per_pc("start", {"session_id": "A"}, "wt"))
+
+    def test_stale_opening_lock_is_taken_over(self):
+        lock = self.path(hook.OPENING_NAME)
+        open(lock, "w").close()
+        old = time.time() - 60
+        os.utime(lock, (old, old))
+        self.assertTrue(hook.one_game_per_pc("start", {"session_id": "A"}, "wt"))
+
+    def test_second_session_reuses_the_open_game(self):
+        a = hook.heartbeat_state({"session_id": "A"}, "wt")
+        hook.one_game_per_pc("start", {"session_id": "A"}, "wt")
+        self.game_running(a)
+        self.assertFalse(hook.one_game_per_pc("start", {"session_id": "B"}, "wt"))
+        self.assertEqual(self.read(a), "run")
+        self.assertEqual(hook.read_current()["owner"], "B")
+
+    def test_only_the_followed_session_pauses_or_closes_it(self):
+        a = hook.heartbeat_state({"session_id": "A"}, "wt")
+        hook.one_game_per_pc("start", {"session_id": "A"}, "wt")
+        self.game_running(a)
+        hook.one_game_per_pc("start", {"session_id": "B"}, "wt")   # B follows now
+        _ = hook._write(a, "run")
+        self.assertFalse(hook.one_game_per_pc("stop", {"session_id": "A"}, "wt"))
+        self.assertFalse(hook.one_game_per_pc("end", {"session_id": "A"}, "wt"))
+        self.assertEqual(self.read(a), "run")                      # A changed nothing
+        self.assertFalse(hook.one_game_per_pc("stop", {"session_id": "B"}, "wt"))
+        self.assertEqual(self.read(a), "done")                     # B paused it
+
+    def test_owner_on_its_own_game_takes_the_usual_path(self):
+        a = hook.heartbeat_state({"session_id": "A"}, "wt")
+        hook.one_game_per_pc("start", {"session_id": "A"}, "wt")
+        self.game_running(a)
+        self.assertTrue(hook.one_game_per_pc("start", {"session_id": "A"}, "wt"))
+        self.assertTrue(hook.one_game_per_pc("stop", {"session_id": "A"}, "wt"))
+
+    def test_silenced_opens_nothing_and_closes_an_open_game(self):
+        with open(hook.MUTED, "w") as f:
+            f.write("1")
+        a = hook.heartbeat_state({"session_id": "A"}, "wt")
+        self.game_running(a)
+        self.assertFalse(hook.one_game_per_pc("start", {"session_id": "B"}, "wt"))
+        self.assertEqual(self.read(a), "quit")
+        with open(hook.MUTED, "w") as f:
+            f.write("0")
+        os.remove(self.path(hook.LIVE_NAME))
+        self.assertTrue(hook.one_game_per_pc("start", {"session_id": "B"}, "wt"))
+
+    def test_game_beats_into_the_pc_wide_file_and_frees_the_lock(self):
+        state = self.path("g.state")
+        with mock.patch.object(common, "STATE", state), mock.patch.object(common, "ALIVE", state + ".alive"),                 mock.patch.object(common, "LIVE", self.path(hook.LIVE_NAME)),                 mock.patch.object(common, "OPENING", self.path(hook.OPENING_NAME)):
+            open(self.path(hook.OPENING_NAME), "w").close()
+            common.heartbeat()
+            self.assertEqual(hook.running_game(), state)
+            self.assertFalse(os.path.exists(self.path(hook.OPENING_NAME)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
